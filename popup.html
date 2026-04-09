@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Я не вижу ваших лайков!</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup__header">
+        <div class="popup__header-main">
+          <h1 class="popup__title">Я не вижу ваших лайков!</h1>
+          <p class="popup__last-updated" id="last-updated">Последняя проверка: ещё не выполнялась</p>
+        </div>
+        <div class="popup__header-status">
+          <button
+            class="popup__refresh"
+            id="refresh-button"
+            type="button"
+            aria-label="Обновить сейчас"
+            title="Обновить сейчас"
+          ></button>
+          <div class="popup__count" id="count-badge">0</div>
+        </div>
+      </header>
+
+      <section class="popup__message hidden" id="message-box"></section>
+
+      <section class="popup__content">
+        <div class="popup__empty hidden" id="empty-state">
+          Нет pull requests в отслеживаемом блоке.
+        </div>
+        <ul class="popup__list" id="items-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="popup.mjs"></script>
+  </body>
+</html>
