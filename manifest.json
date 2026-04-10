@@ -2,12 +2,13 @@
   "manifest_version": 3,
   "name": "PR Notify",
   "description": "Показывает pull requests из блока Assigned to my teams в Azure DevOps",
-  "version": "1.2",
+  "version": "1.4",
   "minimum_chrome_version": "116",
   "permissions": [
     "alarms",
     "storage",
-    "notifications"
+    "notifications",
+    "scripting"
   ],
   "host_permissions": [
     "https://hqrndtfs.avp.ru/*"

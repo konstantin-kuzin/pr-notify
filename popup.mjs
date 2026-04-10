@@ -1,5 +1,6 @@
 const STORAGE_KEY = "prState";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
+const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const DEFAULT_STATE = {
   items: [],
   count: 0,
@@ -15,6 +16,8 @@ const itemsList = document.querySelector("#items-list");
 const refreshButton = document.querySelector("#refresh-button");
 
 let isRefreshing = false;
+let transientMessage = "";
+const approvingPullRequestIds = new Set();
 let currentState = { ...DEFAULT_STATE };
 
 void init();
@@ -74,8 +77,14 @@ function render() {
     isRefreshing ? "Обновление выполняется" : "Обновить сейчас",
   );
 
-  if (currentState.lastError) {
-    messageBox.textContent = `Последняя проверка завершилась ошибкой: ${currentState.lastError}`;
+  const message = transientMessage || (
+    currentState.lastError
+      ? `Последняя проверка завершилась ошибкой: ${currentState.lastError}`
+      : ""
+  );
+
+  if (message) {
+    messageBox.textContent = message;
     messageBox.classList.remove("hidden");
   } else {
     messageBox.textContent = "";
@@ -110,11 +119,21 @@ function applyPopupMaxHeight() {
 }
 
 async function refreshNow() {
+  return refreshState({
+    clearTransientMessage: true,
+    errorPrefix: "Ручное обновление завершилось ошибкой",
+  });
+}
+
+async function refreshState({ clearTransientMessage, errorPrefix }) {
   if (isRefreshing) {
-    return;
+    return false;
   }
 
   isRefreshing = true;
+  if (clearTransientMessage) {
+    transientMessage = "";
+  }
   render();
 
   try {
@@ -125,11 +144,11 @@ async function refreshNow() {
     if (!response?.ok) {
       throw new Error(response?.error || "Не удалось выполнить ручное обновление.");
     }
+
+    return true;
   } catch (error) {
-    messageBox.textContent = `Ручное обновление завершилось ошибкой: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
-    messageBox.classList.remove("hidden");
+    transientMessage = `${errorPrefix}: ${error instanceof Error ? error.message : String(error)}`;
+    return false;
   } finally {
     isRefreshing = false;
     currentState = await loadState();
@@ -140,6 +159,7 @@ async function refreshNow() {
 function createItemElement(item) {
   const listItem = document.createElement("li");
   listItem.className = "popup__item";
+  const isTechPR = isTechPullRequest(item.description);
 
   if (isStalePullRequest(item, currentState.lastCheckedAt)) {
     listItem.classList.add("popup__item--stale");
@@ -160,6 +180,9 @@ function createItemElement(item) {
   const itemContent = document.createElement("div");
   itemContent.className = "popup__item-content";
 
+  const itemHeader = document.createElement("div");
+  itemHeader.className = "popup__item-header";
+
   const button = document.createElement("button");
   button.className = "popup__link";
   button.type = "button";
@@ -179,22 +202,102 @@ function createItemElement(item) {
   authorRow.append(author);
 
   if (item.description) {
-    const { infoButton, isTechPR } = createInfoTooltip(item.description);
+    const infoButton = createInfoTooltip(item.description);
     authorRow.append(infoButton);
-
-    if (isTechPR) {
-      const badge = document.createElement("span");
-      badge.className = "popup__badge";
-      badge.textContent = "ТЕХ ПР";
-      authorRow.append(badge);
-    }
   }
 
-  itemContent.append(button, authorRow);
+  if (isTechPR) {
+    const badge = document.createElement("span");
+    badge.className = "popup__badge";
+    badge.textContent = "ТЕХ ПР";
+    authorRow.append(badge);
+  }
+
+  if (isTechPR) {
+    itemHeader.append(button, createApproveButton(item));
+  } else {
+    itemHeader.append(button);
+  }
+
+  itemContent.append(itemHeader, authorRow);
+
   itemMain.append(itemContent);
   listItem.append(itemMain);
 
   return listItem;
+}
+
+function createApproveButton(item) {
+  const approveButton = document.createElement("button");
+  const isApproving = approvingPullRequestIds.has(item.id);
+  const label = isApproving ? `Approve выполняется для PR #${item.id}` : `Approve PR #${item.id}`;
+
+  approveButton.className = "popup__approve";
+  approveButton.type = "button";
+  approveButton.disabled = isApproving;
+  approveButton.setAttribute("aria-label", label);
+  approveButton.setAttribute("title", label);
+  approveButton.append(createApproveIcon());
+  approveButton.addEventListener("click", () => {
+    void approvePullRequest(item);
+  });
+
+  return approveButton;
+}
+
+function createApproveIcon() {
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.classList.add("popup__approve-icon");
+  icon.setAttribute("viewBox", "0 0 16 16");
+  icon.setAttribute("aria-hidden", "true");
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M3.5 8.5 6.5 11.5 12.5 4.5");
+
+  icon.append(path);
+  return icon;
+}
+
+async function approvePullRequest(item) {
+  if (!item?.id || approvingPullRequestIds.has(item.id)) {
+    return;
+  }
+
+  approvingPullRequestIds.add(item.id);
+  transientMessage = "";
+  render();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: APPROVE_MESSAGE_TYPE,
+      url: item.url,
+      pullRequestId: item.id,
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Не удалось выполнить Approve.");
+    }
+
+    transientMessage = `Approve выполнен для PR #${item.id}. Обновляю список…`;
+    render();
+
+    const refreshOk = await refreshState({
+      clearTransientMessage: false,
+      errorPrefix: `Approve выполнен для PR #${item.id}, но обновление списка завершилось ошибкой`,
+    });
+
+    if (refreshOk) {
+      transientMessage = `Approve выполнен для PR #${item.id}. Список обновлён.`;
+    }
+  } catch (error) {
+    transientMessage = `Approve завершился ошибкой для PR #${item.id}: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+  } finally {
+    approvingPullRequestIds.delete(item.id);
+    currentState = await loadState();
+    render();
+  }
 }
 
 function formatTimestamp(timestamp) {
@@ -286,8 +389,6 @@ function createInfoTooltip(description) {
   tooltip.innerHTML = renderMarkdown(description);
   tooltip.setAttribute("role", "tooltip");
 
-  const isTechPR = /те[хx]\s*п[рp]/i.test(description);
-
   let isVisible = false;
 
   const showTooltip = () => {
@@ -330,7 +431,7 @@ function createInfoTooltip(description) {
   tooltip.addEventListener("mouseleave", hideTooltip);
 
   wrapper.append(infoButton, tooltip);
-  return { infoButton: wrapper, isTechPR };
+  return wrapper;
 }
 
 function renderMarkdown(text) {
@@ -338,4 +439,12 @@ function renderMarkdown(text) {
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`(.+?)`/g, "<code>$1</code>");
+}
+
+function isTechPullRequest(description) {
+  if (typeof description !== "string") {
+    return false;
+  }
+
+  return /те[хx]\s*п[рp]/i.test(description);
 }
