@@ -54,7 +54,15 @@ async function loadState() {
 }
 
 function render() {
-  countBadge.textContent = String(currentState.count ?? 0);
+  const hasError = !!currentState.lastError;
+
+  if (hasError) {
+    countBadge.classList.add("hidden");
+  } else {
+    countBadge.classList.remove("hidden");
+    countBadge.textContent = String(currentState.count ?? 0);
+  }
+
   lastUpdated.textContent = `Последняя проверка: ${formatTimestamp(currentState.lastCheckedAt)}`;
   refreshButton.disabled = isRefreshing;
   refreshButton.setAttribute(

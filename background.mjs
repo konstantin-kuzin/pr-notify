@@ -28,13 +28,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
 
-  void refreshPullRequests("alarm");
+  void restoreBadgeFromState().then(() => refreshPullRequests("alarm"));
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== REFRESH_MESSAGE_TYPE) {
     return undefined;
   }
+
+  void restoreBadgeFromState();
 
   void refreshPullRequests("manual")
     .then((state) => {
@@ -52,11 +54,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 void bootstrap({ refresh: false, trigger: "service-worker-load" });
 
+async function restoreBadgeFromState() {
+  const state = await getStoredState();
+  await updateBadge(state.count, !!state.lastError);
+}
+
 async function bootstrap({ refresh, trigger }) {
   await ensureAlarm();
 
   const state = await getStoredState();
-  await updateBadge(state.count);
+  const hasError = !!state.lastError;
+  await updateBadge(hasError ? 0 : state.count, hasError);
 
   if (refresh || !state.lastSuccessAt) {
     await refreshPullRequests(trigger);
@@ -95,14 +103,15 @@ async function refreshPullRequests(trigger) {
     if (!parsed.sectionFound) {
       const nextState = {
         ...previousState,
+        count: 0,
         lastCheckedAt: checkedAt,
         lastTrigger: trigger,
         lastError:
           "Не найден блок Assigned to my teams/Assigned to me на странице pull requests.",
       };
 
+      await updateBadge(0, true);
       await saveState(nextState);
-      await updateBadge(nextState.count);
       return nextState;
     }
 
@@ -118,7 +127,7 @@ async function refreshPullRequests(trigger) {
     };
 
     await saveState(nextState);
-    await updateBadge(nextState.count);
+    await updateBadge(nextState.count, false);
 
     const newItems = parsed.items.filter(
       (item) => !previousState.previousItemIds?.includes(item.id),
@@ -132,13 +141,14 @@ async function refreshPullRequests(trigger) {
   } catch (error) {
     const nextState = {
       ...previousState,
+      count: 0,
       lastCheckedAt: checkedAt,
       lastTrigger: trigger,
       lastError: error instanceof Error ? error.message : String(error),
     };
 
+    await updateBadge(0, true);
     await saveState(nextState);
-    await updateBadge(nextState.count);
     return nextState;
   }
 }
@@ -157,14 +167,30 @@ async function saveState(state) {
   });
 }
 
-async function updateBadge(count) {
-  const text = count > 0 ? String(count) : "";
+async function updateBadge(count, isError) {
+  const text = isError ? "" : (count > 0 ? String(count) : "");
 
-  await chrome.action.setBadgeBackgroundColor({ color: "#ca2c2c" });
+  await chrome.action.setBadgeBackgroundColor({ color: isError ? "#a00000" : "#ca2c2c" });
   await chrome.action.setBadgeText({ text });
 
   if (chrome.action.setBadgeTextColor) {
     await chrome.action.setBadgeTextColor({ color: "#ffffff" });
+  }
+
+  if (isError) {
+    await chrome.action.setIcon({
+      path: {
+        16: "icons/icon-16-error.png",
+        32: "icons/icon-32-error.png",
+      },
+    });
+  } else {
+    await chrome.action.setIcon({
+      path: {
+        16: "icons/icon-16.png",
+        32: "icons/icon-32.png",
+      },
+    });
   }
 }
 

@@ -2,10 +2,10 @@
 
 ## Назначение
 
-`PR Notify` — Chrome-расширение для мониторинга pull requests на странице Monorepo TFS/Azure DevOps.
+`PR Notify` — Chrome-расширение для мониторинга pull requests на странице Azure DevOps.
 
 
-Основной сценарий: пользователь видит количество активных PR своей команды прямо на иконке расширения и может открыть список PR без перехода на страницу pull requests
+Основной сценарий: пользователь видит количество активных PR своей команды прямо на иконке расширения и может открыть список PR в popup.
 
 Расширение ориентировано на работу в уже авторизованной сессии TFS в браузере Chrome.
 
@@ -27,6 +27,7 @@
 - отображает tooltip с описанием PR, если описание присутствует в источнике данных
 - помечает PR бейджем `ТЕХ ПР`, если в описании найден соответствующий маркер
 - отправляет системное уведомление, если при очередной успешной проверке появились новые PR
+- при ошибке загрузки или разбора страницы скрывает badge с количеством, переключает иконку расширения на error-вариант и показывает текст ошибки в popup
 - сохраняет последнее успешное состояние и не очищает список при временной ошибке загрузки
 
 ## Какие PR попадают в список
@@ -98,9 +99,17 @@
 
 Если список пустой, badge очищается.
 
+Если проверка завершилась ошибкой или на странице не найден целевой блок:
+
+- в состояние сохраняется текст ошибки в `lastError`
+- badge с количеством очищается, чтобы не показывать устаревшее число PR
+- иконка переключается на error-вариант
+- popup продолжает использовать последний успешно сохранённый список PR и одновременно показывает сообщение об ошибке
+- при следующем запуске service worker или перед новым обновлением состояние ошибки сначала восстанавливается из сохранённого состояния
+
 ### 5. Работа popup
 
-Popup реализован в [popup.html](/Users/Kuzin_K/Vibecoding/pr-notify/popup.html), [popup.css](/Users/Kuzin_K/Vibecoding/pr-notify/popup.css) и [popup.mjs](/Users/Kuzin_K/Vibecoding/pr-notify/popup.mjs).
+Popup реализован в [popup.html](/popup.html), [popup.css](/popup.css) и [popup.mjs](/popup.mjs).
 
 При открытии popup:
 
@@ -113,17 +122,17 @@ Popup ограничен по высоте половиной доступной
 
 ## Структура проекта
 
-- [manifest.json](/Users/Kuzin_K/Vibecoding/pr-notify/manifest.json)
+- [manifest.json](/manifest.json)
   - конфигурация MV3-расширения, разрешения, popup, service worker, иконки
-- [background.mjs](/Users/Kuzin_K/Vibecoding/pr-notify/background.mjs)
+- [background.mjs](/background.mjs)
   - периодическая проверка, ручное обновление, badge, уведомления, сохранение состояния
-- [parser.mjs](/Users/Kuzin_K/Vibecoding/pr-notify/parser.mjs)
+- [parser.mjs](/parser.mjs)
   - извлечение и нормализация PR из `dataProviders`
-- [popup.html](/Users/Kuzin_K/Vibecoding/pr-notify/popup.html)
+- [popup.html](/popup.html)
   - разметка popup
-- [popup.css](/Users/Kuzin_K/Vibecoding/pr-notify/popup.css)
+- [popup.css](/popup.css)
   - стили popup
-- [popup.mjs](/Users/Kuzin_K/Vibecoding/pr-notify/popup.mjs)
+- [popup.mjs](/popup.mjs)
   - рендер списка, ручное обновление, tooltip, форматирование возраста PR
 
 ## Разрешения расширения
