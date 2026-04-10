@@ -4,18 +4,9 @@ export const TARGET_PAGE_URL =
 export const TARGET_SECTION_TITLES = ["Assigned to my teams", "Assigned to me"];
 
 const DATA_PROVIDERS_KEY = "ms.vss-code-web.prs-list-data-provider";
-const SECTION_CARD_MARKER = '<div class="flex-noshrink repos-pr-section-card';
-const ROW_CLASS =
-  "bolt-list-row-marked bolt-table-row bolt-list-row single-click-activation v-align-middle selectable-text";
 
 export function parsePullRequests(html) {
-  const fromDataProviders = parseFromDataProviders(html);
-
-  if (fromDataProviders) {
-    return fromDataProviders;
-  }
-
-  return parseFromRenderedDom(html);
+  return parseFromDataProviders(html);
 }
 
 function parseFromDataProviders(html) {
@@ -59,37 +50,6 @@ function parseFromDataProviders(html) {
   return {
     items: sortPullRequestsOldestFirst(items),
     matchedSectionTitle: matchedQuery.title ?? null,
-    sectionFound: true,
-  };
-}
-
-function parseFromRenderedDom(html) {
-  const sections = splitIntoSections(html);
-  const sectionSummaries = sections.map((sectionHtml) => ({
-    html: sectionHtml,
-    title: extractSectionTitle(sectionHtml),
-  }));
-  const matchedSection = sectionSummaries.find((section) =>
-    TARGET_SECTION_TITLES.includes(section.title),
-  );
-
-  if (!matchedSection) {
-    return {
-      items: [],
-      matchedSectionTitle: null,
-      sectionFound: false,
-    };
-  }
-
-  const rows = extractRows(matchedSection.html);
-  const matchedSectionTitle = matchedSection.title;
-  const items = rows
-    .map((rowHtml, index) => parseRow(rowHtml, index))
-    .filter(Boolean);
-
-  return {
-    items: sortPullRequestsOldestFirst(items),
-    matchedSectionTitle,
     sectionFound: true,
   };
 }
@@ -163,109 +123,6 @@ function isActivePullRequestForQuery(pullRequest, query) {
   }
 
   return matchedReviewers.some((reviewer) => Number(reviewer?.vote ?? 0) === 0);
-}
-
-function splitIntoSections(html) {
-  return html
-    .split(SECTION_CARD_MARKER)
-    .slice(1)
-    .map((sectionHtml) => `${SECTION_CARD_MARKER}${sectionHtml}`);
-}
-
-function extractSectionTitle(sectionHtml) {
-  const match = sectionHtml.match(
-    /<div class="repos-pr-section-header-title[^"]*">\s*<span[^>]*>([\s\S]*?)<\/span>/i,
-  );
-
-  return normalizeText(match?.[1] ?? "");
-}
-
-function extractRows(sectionHtml) {
-  const rows = [];
-  const pattern = new RegExp(
-    `<a\\b[^>]*class="${escapeRegExp(ROW_CLASS)}"[^>]*>[\\s\\S]*?<\\/a>`,
-    "gi",
-  );
-
-  for (const match of sectionHtml.matchAll(pattern)) {
-    rows.push(match[0]);
-  }
-
-  return rows;
-}
-
-function parseRow(rowHtml, index) {
-  const href = extractAttribute(rowHtml, "href");
-  const title = extractTitle(rowHtml);
-  const author = extractAuthor(rowHtml);
-  const avatarUrl = extractAvatarUrl(rowHtml);
-  const description = extractDescription(rowHtml);
-
-  if (!href || !title) {
-    return null;
-  }
-
-  return {
-    id: extractPullRequestId(href) ?? `pr-${index + 1}`,
-    title,
-    author,
-    avatarUrl,
-    createdAt: null,
-    description,
-    url: new URL(href, TARGET_PAGE_URL).href,
-  };
-}
-
-function extractAttribute(html, attributeName) {
-  const pattern = new RegExp(`${attributeName}="([^"]+)"`, "i");
-  return html.match(pattern)?.[1] ?? null;
-}
-
-function extractTitle(rowHtml) {
-  const match = rowHtml.match(
-    /<div class="body-l[^"]*font-weight-semibold[^"]*">([\s\S]*?)<\/div>/i,
-  );
-
-  return normalizeText(stripTags(match?.[1] ?? ""));
-}
-
-function extractAuthor(rowHtml) {
-  const match = rowHtml.match(
-    /<div class="secondary-text body-s text-ellipsis">([\s\S]*?)<\/div>/i,
-  );
-
-  const text = normalizeText(stripTags(match?.[1] ?? ""));
-  const [author] = text.split(/\s+request\b/i);
-
-  return author?.trim() ?? "";
-}
-
-function extractAvatarUrl(rowHtml) {
-  const match = rowHtml.match(/<img[^>]*class="[^"]*bolt-coin-content[^"]*"[^>]*src="([^"]+)"/i);
-  return match?.[1] ?? "";
-}
-
-function extractDescription(rowHtml) {
-  const match = rowHtml.match(
-    /<div class="body-s secondary-text text-ellipsis"[^>]*>([\s\S]*?)<\/div>/gi,
-  );
-
-  if (!match) {
-    return "";
-  }
-
-  const descriptionMatch = match[1]?.match(/>([\s\S]*?)</i);
-
-  return descriptionMatch ? normalizeDescription(stripTags(descriptionMatch[1] ?? "")) : "";
-}
-
-function extractPullRequestId(href) {
-  const match = href.match(/\/pullrequest\/(\d+)/i);
-  return match?.[1] ?? null;
-}
-
-function stripTags(value) {
-  return value.replace(/<[^>]+>/g, " ");
 }
 
 function normalizeText(value) {
@@ -347,8 +204,4 @@ function decodeHtmlEntities(value) {
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'");
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

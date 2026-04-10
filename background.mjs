@@ -12,6 +12,7 @@ const DEFAULT_STATE = {
   lastSuccessAt: null,
   lastTrigger: null,
   lastError: null,
+  previousItemIds: [],
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -113,10 +114,20 @@ async function refreshPullRequests(trigger) {
       lastSuccessAt: checkedAt,
       lastTrigger: trigger,
       lastError: null,
+      previousItemIds: parsed.items.map((item) => item.id),
     };
 
     await saveState(nextState);
     await updateBadge(nextState.count);
+
+    const newItems = parsed.items.filter(
+      (item) => !previousState.previousItemIds?.includes(item.id),
+    );
+
+    if (newItems.length > 0) {
+      void showNotification(newItems);
+    }
+
     return nextState;
   } catch (error) {
     const nextState = {
@@ -155,4 +166,30 @@ async function updateBadge(count) {
   if (chrome.action.setBadgeTextColor) {
     await chrome.action.setBadgeTextColor({ color: "#ffffff" });
   }
+}
+
+async function showNotification(newItems) {
+  const count = newItems.length;
+  const title = count === 1
+    ? `Новый pull request`
+    : `Новых pull requests: ${count}`;
+
+  const messages = newItems
+    .slice(0, 3)
+    .map((item) => `#${item.id} ${item.title}`);
+
+  if (newItems.length > 3) {
+    messages.push(`…и ещё ${newItems.length - 3}`);
+  }
+
+  const message = messages.join("\n");
+
+  await chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/icon-128.png",
+    title,
+    message,
+    priority: 1,
+    requireInteraction: false,
+  });
 }
