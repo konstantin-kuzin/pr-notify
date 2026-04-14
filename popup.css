@@ -171,7 +171,29 @@ body {
 }
 
 .popup__empty {
-  padding: 12px;
+  font-size: 1.5rem;
+  color: var(--muted);
+}
+
+.popup__empty-setup-hint {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.popup__empty-setup-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.popup__empty-setup-link:hover,
+.popup__empty-setup-link:focus-visible {
   color: var(--muted);
 }
 

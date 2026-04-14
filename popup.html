@@ -29,7 +29,10 @@
 
       <section class="popup__content">
         <div class="popup__empty hidden" id="empty-state">
-          Нет pull requests по вашим reviewer-группам и личным назначениям.
+          Нет pull requests для ревью
+          <p class="popup__empty-setup-hint hidden" id="empty-setup-hint">
+            <button type="button" class="popup__empty-setup-link" id="empty-setup-link">Выберите</button> группы ревьюверов в которых вы состоите
+          </p>
         </div>
         <ul class="popup__list" id="items-list"></ul>
       </section>
@@ -41,7 +44,7 @@
           target="_blank"
           rel="noopener noreferrer"
         >GitHub</a>
-        <button type="button" class="popup__options-link" id="options-link">Настройки подключения</button>
+        <button type="button" class="popup__options-link" id="options-link">Настройки</button>
       </footer>
     </main>
 

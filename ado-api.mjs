@@ -1155,7 +1155,10 @@ export function mapPullRequestToItem(pr, config) {
   const author = normalizePlainText(pr?.createdBy?.displayName ?? "");
   const avatarUrl = pickPullRequestAuthorAvatarUrl(pr?.createdBy, config.apiRoot);
   const createdAt = normalizeIsoDate(pr?.creationDate);
-  const updatedAt = normalizeIsoDate(pr?.lastCommitAt) ?? createdAt;
+  const updatedAt = pickLatestIsoDate(
+    normalizeIsoDate(pr?.lastCommitAt),
+    createdAt,
+  );
   const description = normalizeDescription(pr?.description ?? "");
   const url = buildPullRequestWebUrl(apiRoot, project, repo, id, pr);
 
@@ -1173,6 +1176,30 @@ export function mapPullRequestToItem(pr, config) {
     description,
     url,
   };
+}
+
+function pickLatestIsoDate(...values) {
+  let latest = null;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+
+    const timestamp = Date.parse(value);
+
+    if (!Number.isFinite(timestamp)) {
+      continue;
+    }
+
+    if (timestamp > latestTimestamp) {
+      latest = value;
+      latestTimestamp = timestamp;
+    }
+  }
+
+  return latest;
 }
 
 /** Старые по дате обновления (`updatedAt ?? createdAt`) — выше в списке. */

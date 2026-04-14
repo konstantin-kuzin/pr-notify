@@ -1,4 +1,5 @@
 const STORAGE_KEY = "prState";
+const ADO_CONFIG_KEY = "adoConfig";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const DEFAULT_STATE = {
@@ -12,6 +13,8 @@ const countBadge = document.querySelector("#count-badge");
 const lastUpdated = document.querySelector("#last-updated");
 const messageBox = document.querySelector("#message-box");
 const emptyState = document.querySelector("#empty-state");
+const emptySetupHint = document.querySelector("#empty-setup-hint");
+const emptySetupLink = document.querySelector("#empty-setup-link");
 const itemsList = document.querySelector("#items-list");
 const refreshButton = document.querySelector("#refresh-button");
 const optionsLink = document.querySelector("#options-link");
@@ -22,6 +25,7 @@ let transientMessageTone = "error";
 let transientMessageTimer = null;
 const approvingPullRequestIds = new Set();
 let currentState = { ...DEFAULT_STATE };
+let hasConfiguredGroups = false;
 
 void init();
 
@@ -41,11 +45,15 @@ function applyPopupMaxHeight() {
 async function init() {
   applyPopupMaxHeight();
   currentState = await loadState();
+  hasConfiguredGroups = await loadHasConfiguredGroups();
   render();
   refreshButton.addEventListener("click", () => {
     void refreshNow();
   });
   optionsLink?.addEventListener("click", () => {
+    void chrome.runtime.openOptionsPage();
+  });
+  emptySetupLink?.addEventListener("click", () => {
     void chrome.runtime.openOptionsPage();
   });
   window.addEventListener("resize", applyPopupMaxHeight);
@@ -60,6 +68,10 @@ async function init() {
         ...DEFAULT_STATE,
         ...(changes[STORAGE_KEY].newValue ?? {}),
       };
+    }
+
+    if (changes[ADO_CONFIG_KEY]) {
+      hasConfiguredGroups = hasAnyConfiguredGroups(changes[ADO_CONFIG_KEY].newValue);
     }
 
     render();
@@ -118,14 +130,45 @@ function render() {
 
   if (!currentState.items.length) {
     emptyState.classList.remove("hidden");
+    emptySetupHint?.classList.toggle("hidden", hasConfiguredGroups);
     return;
   }
 
   emptyState.classList.add("hidden");
+  emptySetupHint?.classList.add("hidden");
 
   for (const item of currentState.items) {
     itemsList.append(createItemElement(item));
   }
+}
+
+async function loadHasConfiguredGroups() {
+  const stored = await chrome.storage.local.get(ADO_CONFIG_KEY);
+  return hasAnyConfiguredGroups(stored[ADO_CONFIG_KEY]);
+}
+
+function hasAnyConfiguredGroups(config) {
+  if (!config || typeof config !== "object") {
+    return false;
+  }
+
+  const selectedGroupIds = Array.isArray(config.selectedGroupIds)
+    ? config.selectedGroupIds
+    : [];
+
+  if (selectedGroupIds.some((id) => String(id ?? "").trim())) {
+    return true;
+  }
+
+  const selectedTeamIds = Array.isArray(config.selectedTeamIds)
+    ? config.selectedTeamIds
+    : [];
+
+  if (selectedTeamIds.some((id) => String(id ?? "").trim())) {
+    return true;
+  }
+
+  return String(config.teamReviewerIds ?? "").trim().length > 0;
 }
 
 async function refreshNow() {
@@ -353,18 +396,18 @@ async function approvePullRequest(item) {
     });
 
     if (!response?.ok) {
-      throw new Error(response?.error || "Не удалось выполнить Approve.");
+      throw new Error(response?.error || "Не удалось лайкнуть PR ((.");
     }
 
-    showTransientMessage(`Approve выполнен для PR #${item.id}. Обновляю список…`, "success", 2000);
+    showTransientMessage(`PR #${item.id} одобрен. Обновляю список…`, "success", 2000);
 
     const refreshOk = await refreshState({
       clearTransientMessage: false,
-      errorPrefix: `Approve выполнен для PR #${item.id}, но обновление списка завершилось ошибкой`,
+      errorPrefix: `PR #${item.id} одобрен, но обновление списка завершилось ошибкой`,
     });
 
     if (refreshOk) {
-      showTransientMessage(`Approve выполнен для PR #${item.id}. Список обновлён.`, "success", 2000);
+      showTransientMessage(`PR #${item.id} одобрен.`, "success", 2000);
     }
   } catch (error) {
     showTransientMessage(
