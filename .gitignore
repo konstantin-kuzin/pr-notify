@@ -1,4 +1,3 @@
 .DS_Store
 .vscode
-test-parser.mjs
-example.html
+tmp/

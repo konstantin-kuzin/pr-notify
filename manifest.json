@@ -1,18 +1,24 @@
 {
   "manifest_version": 3,
   "name": "PR Notify",
-  "description": "Показывает pull requests из блока Assigned to my teams в Azure DevOps",
-  "version": "1.4",
+  "description": "Показывает pull requests отправленные вам на ревью в Azure DevOps",
+  "version": "2.0",
   "minimum_chrome_version": "116",
   "permissions": [
     "alarms",
     "storage",
-    "notifications",
-    "scripting"
+    "notifications"
   ],
   "host_permissions": [
     "https://hqrndtfs.avp.ru/*"
   ],
+  "optional_host_permissions": [
+    "https://dev.azure.com/*"
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
   "background": {
     "service_worker": "background.mjs",
     "type": "module"

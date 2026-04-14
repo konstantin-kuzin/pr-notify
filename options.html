@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PR Notify — настройки</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="options">
+      <h1 class="options__title">Настройки</h1>
+
+      <form id="options-form" class="options__form">
+        <label class="options__field">
+          <span class="options__label">Коллекция</span>
+          <input
+            class="options__input"
+            id="api-root"
+            name="apiRoot"
+            type="url"
+            autocomplete="off"
+            placeholder="https://…/tfs/DefaultCollection"
+            required
+          >
+          <span class="options__hint">Формат: https://<сервер>/tfs/<имя_коллекции>. Для dev.azure.com: <code>https://dev.azure.com/&lt;org&gt;</code></span>
+        </label>
+
+        <label class="options__field">
+          <span class="options__label">Проект</span>
+          <input class="options__input" id="project" name="project" type="text" required>
+          <span class="options__hint">Например, Monorepo</span>
+        </label>
+
+        <label class="options__field">
+          <span class="options__label">Репозиторий (имя или GUID)</span>
+          <input class="options__input" id="repository-id" name="repositoryId" type="text" required>
+          <span class="options__hint">Например, опять же, Monorepo</span>
+        </label>
+
+        <fieldset class="options__fieldset" id="groups-block">
+          <legend class="options__fieldset-legend">Reviewer-группы для отслеживания PR</legend>
+          <div class="options__groups-search-row">
+            <input
+              class="options__input"
+              id="groups-filter"
+              type="search"
+              autocomplete="off"
+              placeholder="Полное название группы, например, Hexa UI Design Review"
+              aria-label="Поиск reviewer-группы по полному названию"
+            >
+            <button class="options__button options__button--secondary" type="button" id="groups-reload">
+              Найти группы
+            </button>
+          </div>
+          <p class="options__groups-status" id="groups-status" role="status"></p>
+          <div class="options__groups-list" id="groups-list" role="list"></div>
+        </fieldset>
+
+        <div class="options__actions">
+          <button class="options__button" type="submit">Сохранить</button>
+          <span class="options__status" id="save-status" role="status"></span>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="options.mjs"></script>
+  </body>
+</html>

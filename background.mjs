@@ -1,15 +1,28 @@
-import { parsePullRequests, TARGET_PAGE_URL } from "./parser.mjs";
+import {
+  ADO_CONFIG_KEY,
+  loadAdoConfig,
+  validateAdoConfig,
+} from "./ado-config.mjs";
+import {
+  attachPullRequestLastCommitTimes,
+  fetchConnectionIdentity,
+  filterPullRequestsForExtension,
+  getExtensionReviewerContext,
+  listActivePullRequestsForAllowedReviewers,
+  logAdoError,
+  mapPullRequestToItem,
+  setReviewerVoteApprove,
+  sortPullRequestsOldestFirst,
+} from "./ado-api.mjs";
 
 const ALARM_NAME = "refresh-pull-requests";
 const CHECK_INTERVAL_MINUTES = 10;
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const STORAGE_KEY = "prState";
-const APPROVE_TAB_TIMEOUT_MS = 45_000;
-const APPROVE_POLL_INTERVAL_MS = 750;
-const APPROVE_CONFIRM_TIMEOUT_MS = 15_000;
 const APPROVE_REFRESH_TIMEOUT_MS = 15_000;
 const APPROVE_REFRESH_INTERVAL_MS = 2_000;
+
 const DEFAULT_STATE = {
   items: [],
   count: 0,
@@ -37,6 +50,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void restoreBadgeFromState().then(() => refreshPullRequests("alarm"));
 });
 
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || !changes[ADO_CONFIG_KEY]) {
+    return;
+  }
+
+  void refreshPullRequests("config-change");
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === REFRESH_MESSAGE_TYPE) {
     void restoreBadgeFromState();
@@ -56,7 +77,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === APPROVE_MESSAGE_TYPE) {
-    void approvePullRequest(message?.url, message?.pullRequestId)
+    void approvePullRequest(message?.pullRequestId)
       .then((result) => {
         sendResponse({ ok: true, result });
       })
@@ -107,50 +128,59 @@ async function ensureAlarm() {
 async function refreshPullRequests(trigger) {
   const previousState = await getStoredState();
   const checkedAt = new Date().toISOString();
+  const config = await loadAdoConfig();
+  const validationErrors = validateAdoConfig(config);
+
+  if (validationErrors.length > 0) {
+    const nextState = {
+      ...previousState,
+      count: 0,
+      lastCheckedAt: checkedAt,
+      lastTrigger: trigger,
+      lastError: `${validationErrors.join(" ")} Откройте настройки расширения.`,
+    };
+
+    logAdoError("config", new Error(nextState.lastError));
+    await updateBadge(0, true);
+    await saveState(nextState);
+    return nextState;
+  }
 
   try {
-    const response = await fetch(TARGET_PAGE_URL, {
-      credentials: "include",
-      cache: "no-store",
-    });
+    const identity = await fetchConnectionIdentity(config);
+    const { allowedReviewerIds } = getExtensionReviewerContext(config, identity.id);
+    const rawPullRequests = await listActivePullRequestsForAllowedReviewers(
+      config,
+      allowedReviewerIds,
+    );
+    const { filtered, matchedSectionTitle } = await filterPullRequestsForExtension(
+      config,
+      rawPullRequests,
+      identity.id,
+    );
+    const enrichedPullRequests = await attachPullRequestLastCommitTimes(config, filtered);
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const html = await response.text();
-    const parsed = parsePullRequests(html);
-
-    if (!parsed.sectionFound) {
-      const nextState = {
-        ...previousState,
-        count: 0,
-        lastCheckedAt: checkedAt,
-        lastTrigger: trigger,
-        lastError:
-          "Не найден блок Assigned to my teams/Assigned to me на странице pull requests.",
-      };
-
-      await updateBadge(0, true);
-      await saveState(nextState);
-      return nextState;
-    }
+    const items = sortPullRequestsOldestFirst(
+      enrichedPullRequests
+        .map((pr) => mapPullRequestToItem(pr, config))
+        .filter(Boolean),
+    );
 
     const nextState = {
-      items: parsed.items,
-      count: parsed.items.length,
-      matchedSectionTitle: parsed.matchedSectionTitle,
+      items,
+      count: items.length,
+      matchedSectionTitle,
       lastCheckedAt: checkedAt,
       lastSuccessAt: checkedAt,
       lastTrigger: trigger,
       lastError: null,
-      previousItemIds: parsed.items.map((item) => item.id),
+      previousItemIds: items.map((item) => item.id),
     };
 
     await saveState(nextState);
     await updateBadge(nextState.count, false);
 
-    const newItems = parsed.items.filter(
+    const newItems = items.filter(
       (item) => !previousState.previousItemIds?.includes(item.id),
     );
 
@@ -160,6 +190,7 @@ async function refreshPullRequests(trigger) {
 
     return nextState;
   } catch (error) {
+    logAdoError("refreshPullRequests", error);
     const nextState = {
       ...previousState,
       count: 0,
@@ -241,33 +272,30 @@ async function showNotification(newItems) {
   });
 }
 
-async function approvePullRequest(url, pullRequestId) {
-  const normalizedUrl = normalizePullRequestUrl(url);
+async function approvePullRequest(pullRequestId) {
   const normalizedPullRequestId = normalizePullRequestId(pullRequestId);
-  const { tabId, shouldClose } = await getApproveTab(normalizedUrl);
 
-  if (typeof tabId !== "number") {
-    throw new Error("Не удалось создать вкладку для approve.");
+  if (!normalizedPullRequestId) {
+    throw new Error("Не передан идентификатор pull request.");
   }
 
-  try {
-    await waitForTabComplete(tabId, APPROVE_TAB_TIMEOUT_MS);
-    await clickApproveButton(tabId, APPROVE_TAB_TIMEOUT_MS);
-    await waitForApproveConfirmation(tabId, APPROVE_CONFIRM_TIMEOUT_MS);
-    const state = normalizedPullRequestId
-      ? await forceRefreshAfterApprove(normalizedPullRequestId)
-      : await refreshPullRequests("approve");
+  const config = await loadAdoConfig();
+  const validationErrors = validateAdoConfig(config);
 
-    return {
-      approved: true,
-      state,
-      url: normalizedUrl,
-    };
-  } finally {
-    if (shouldClose) {
-      await chrome.tabs.remove(tabId).catch(() => {});
-    }
+  if (validationErrors.length > 0) {
+    throw new Error(`${validationErrors.join(" ")} Откройте настройки расширения.`);
   }
+
+  const identity = await fetchConnectionIdentity(config);
+  await setReviewerVoteApprove(config, normalizedPullRequestId, identity.id);
+
+  const state = await forceRefreshAfterApprove(normalizedPullRequestId);
+
+  return {
+    approved: true,
+    state,
+    pullRequestId: normalizedPullRequestId,
+  };
 }
 
 function normalizePullRequestId(pullRequestId) {
@@ -277,81 +305,6 @@ function normalizePullRequestId(pullRequestId) {
 
   const normalizedPullRequestId = String(pullRequestId).trim();
   return normalizedPullRequestId || null;
-}
-
-function normalizePullRequestUrl(url) {
-  if (typeof url !== "string" || !url.trim()) {
-    throw new Error("Не передан URL pull request.");
-  }
-
-  const normalizedUrl = new URL(url);
-
-  if (normalizedUrl.origin !== "https://hqrndtfs.avp.ru") {
-    throw new Error("Approve доступен только для Azure DevOps PR.");
-  }
-
-  return normalizedUrl.href;
-}
-
-function waitForTabComplete(tabId, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let timeoutId = null;
-
-    const finish = (callback) => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-
-      chrome.tabs.onUpdated.removeListener(handleUpdated);
-      callback();
-    };
-
-    const handleUpdated = (updatedTabId, changeInfo) => {
-      if (updatedTabId !== tabId || changeInfo.status !== "complete") {
-        return;
-      }
-
-      finish(resolve);
-    };
-
-    timeoutId = setTimeout(() => {
-      finish(() => reject(new Error("Страница PR не загрузилась вовремя.")));
-    }, timeoutMs);
-
-    chrome.tabs.onUpdated.addListener(handleUpdated);
-
-    void chrome.tabs.get(tabId).then((tab) => {
-      if (tab.status === "complete") {
-        finish(resolve);
-      }
-    }).catch(() => {});
-  });
-}
-
-async function getApproveTab(url) {
-  const fallbackCreateProperties = {
-    url,
-    active: false,
-  };
-
-  const targetWindow = await chrome.windows.getLastFocused({
-    populate: false,
-    windowTypes: ["normal"],
-  }).catch(() => null);
-
-  const createdTab = await chrome.tabs.create(
-    targetWindow?.id
-      ? {
-          ...fallbackCreateProperties,
-          windowId: targetWindow.id,
-        }
-      : fallbackCreateProperties,
-  );
-
-  return {
-    tabId: createdTab.id,
-    shouldClose: true,
-  };
 }
 
 async function forceRefreshAfterApprove(pullRequestId) {
@@ -372,139 +325,6 @@ async function forceRefreshAfterApprove(pullRequestId) {
 function hasPullRequest(state, pullRequestId) {
   return Array.isArray(state?.items)
     && state.items.some((item) => String(item?.id ?? "") === pullRequestId);
-}
-
-async function clickApproveButton(tabId, timeoutMs) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const result = await executeApproveScript(tabId, inspectAndClickApproveButton);
-
-    if (result?.status === "clicked") {
-      return result;
-    }
-
-    if (result?.status === "already-approved") {
-      throw new Error("Этот PR уже не находится в состоянии Approve.");
-    }
-
-    if (result?.status === "unexpected-label") {
-      throw new Error(`Невозможно выполнить Approve: кнопка находится в состоянии "${result.label}".`);
-    }
-
-    await delay(APPROVE_POLL_INTERVAL_MS);
-  }
-
-  throw new Error("Не удалось найти кнопку Approve на странице PR.");
-}
-
-async function waitForApproveConfirmation(tabId, timeoutMs) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const result = await executeApproveScript(tabId, inspectApproveState);
-
-    if (result?.status === "approved") {
-      return result;
-    }
-
-    if (result?.status === "unexpected-label") {
-      return result;
-    }
-
-    await delay(APPROVE_POLL_INTERVAL_MS);
-  }
-
-  throw new Error("Клик по Approve выполнен, но подтверждение изменения статуса не получено.");
-}
-
-async function executeApproveScript(tabId, func) {
-  const [injectionResult] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func,
-  });
-
-  return injectionResult?.result ?? null;
-}
-
-function inspectAndClickApproveButton() {
-  const button = document.querySelector("#pull-request-vote-button");
-
-  if (!(button instanceof HTMLButtonElement)) {
-    return {
-      status: "waiting",
-    };
-  }
-
-  const label = (button.innerText || button.textContent || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!label) {
-    return {
-      status: "waiting",
-    };
-  }
-
-  if (button.disabled) {
-    return {
-      status: "waiting",
-      label,
-    };
-  }
-
-  if (/^approve$/i.test(label)) {
-    button.click();
-    return {
-      status: "clicked",
-      label,
-    };
-  }
-
-  if (/^approved$/i.test(label)) {
-    return {
-      status: "already-approved",
-      label,
-    };
-  }
-
-  return {
-    status: "unexpected-label",
-    label,
-  };
-}
-
-function inspectApproveState() {
-  const button = document.querySelector("#pull-request-vote-button");
-
-  if (!(button instanceof HTMLButtonElement)) {
-    return {
-      status: "waiting",
-    };
-  }
-
-  const label = (button.innerText || button.textContent || "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (/^approved$/i.test(label)) {
-    return {
-      status: "approved",
-      label,
-    };
-  }
-
-  if (/^approve$/i.test(label)) {
-    return {
-      status: "waiting",
-      label,
-    };
-  }
-
-  return {
-    status: "unexpected-label",
-    label,
-  };
 }
 
 function delay(ms) {

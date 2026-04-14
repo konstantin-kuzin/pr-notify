@@ -29,10 +29,20 @@
 
       <section class="popup__content">
         <div class="popup__empty hidden" id="empty-state">
-          Нет pull requests в отслеживаемом блоке.
+          Нет pull requests по вашим reviewer-группам и личным назначениям.
         </div>
         <ul class="popup__list" id="items-list"></ul>
       </section>
+
+      <footer class="popup__footer">
+        <a
+          class="popup__github-link"
+          href="https://github.com/konstantin-kuzin/pr-notify"
+          target="_blank"
+          rel="noopener noreferrer"
+        >GitHub</a>
+        <button type="button" class="popup__options-link" id="options-link">Настройки подключения</button>
+      </footer>
     </main>
 
     <script type="module" src="popup.mjs"></script>
