@@ -109,8 +109,8 @@ body {
 .popup__count {
   min-width: 32px;
   padding: 4px 10px;
-  border: 1px solid #ca2c2c;
-  background: #ca2c2c;
+  border: 1px solid #9e9e9e;
+  background: #9e9e9e;
   color: #ffffff;
   font-size: 15px;
   font-weight: 700;
@@ -260,12 +260,27 @@ body {
   color: var(--muted);
 }
 
-.popup__author-time--stale {
-  color: #e30613;
+.popup__author-time--yellow,
+.popup__author-time--orange,
+.popup__author-time--red {
   font-weight: 600;
   padding: 2px 8px;
-  background: #f9e7ec;
   border-radius: 999px;
+}
+
+.popup__author-time--yellow {
+  color: #8a6d00;
+  background: #fff8e1;
+}
+
+.popup__author-time--orange {
+  color: #c43e00;
+  background: #fff3e0;
+}
+
+.popup__author-time--red {
+  color: #e30613;
+  background: #f9e7ec;
 }
 
 .popup__author-row {

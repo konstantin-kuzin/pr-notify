@@ -14,6 +14,7 @@ import {
   setReviewerVoteApprove,
   sortPullRequestsOldestFirst,
 } from "./ado-api.mjs";
+import { BADGE_STYLES, getBadgeUrgencyFromItems } from "./working-time.mjs";
 
 const ALARM_NAME = "refresh-pull-requests";
 const CHECK_INTERVAL_MINUTES = 10;
@@ -26,7 +27,6 @@ const APPROVE_REFRESH_INTERVAL_MS = 2_000;
 const DEFAULT_STATE = {
   items: [],
   count: 0,
-  matchedSectionTitle: null,
   lastCheckedAt: null,
   lastSuccessAt: null,
   lastTrigger: null,
@@ -98,7 +98,11 @@ void bootstrap({ refresh: false, trigger: "service-worker-load" });
 
 async function restoreBadgeFromState() {
   const state = await getStoredState();
-  await updateBadge(state.count, !!state.lastError);
+  await updateBadge(state.count, {
+    isError: !!state.lastError,
+    items: state.items,
+    checkedAt: state.lastCheckedAt,
+  });
 }
 
 async function bootstrap({ refresh, trigger }) {
@@ -106,7 +110,11 @@ async function bootstrap({ refresh, trigger }) {
 
   const state = await getStoredState();
   const hasError = !!state.lastError;
-  await updateBadge(hasError ? 0 : state.count, hasError);
+  await updateBadge(hasError ? 0 : state.count, {
+    isError: hasError,
+    items: state.items,
+    checkedAt: state.lastCheckedAt,
+  });
 
   if (refresh || !state.lastSuccessAt) {
     await refreshPullRequests(trigger);
@@ -141,7 +149,7 @@ async function refreshPullRequests(trigger) {
     };
 
     logAdoError("config", new Error(nextState.lastError));
-    await updateBadge(0, true);
+    await updateBadge(0, { isError: true });
     await saveState(nextState);
     return nextState;
   }
@@ -153,7 +161,7 @@ async function refreshPullRequests(trigger) {
       config,
       allowedReviewerIds,
     );
-    const { filtered, matchedSectionTitle } = await filterPullRequestsForExtension(
+    const { filtered } = await filterPullRequestsForExtension(
       config,
       rawPullRequests,
       identity.id,
@@ -169,7 +177,6 @@ async function refreshPullRequests(trigger) {
     const nextState = {
       items,
       count: items.length,
-      matchedSectionTitle,
       lastCheckedAt: checkedAt,
       lastSuccessAt: checkedAt,
       lastTrigger: trigger,
@@ -178,7 +185,10 @@ async function refreshPullRequests(trigger) {
     };
 
     await saveState(nextState);
-    await updateBadge(nextState.count, false);
+    await updateBadge(nextState.count, {
+      items: nextState.items,
+      checkedAt: nextState.lastCheckedAt,
+    });
 
     const newItems = items.filter(
       (item) => !previousState.previousItemIds?.includes(item.id),
@@ -199,7 +209,7 @@ async function refreshPullRequests(trigger) {
       lastError: error instanceof Error ? error.message : String(error),
     };
 
-    await updateBadge(0, true);
+    await updateBadge(0, { isError: true });
     await saveState(nextState);
     return nextState;
   }
@@ -219,30 +229,46 @@ async function saveState(state) {
   });
 }
 
-async function updateBadge(count, isError) {
-  const text = isError ? "" : (count > 0 ? String(count) : "");
-
-  await chrome.action.setBadgeBackgroundColor({ color: isError ? "#a00000" : "#ca2c2c" });
-  await chrome.action.setBadgeText({ text });
-
-  if (chrome.action.setBadgeTextColor) {
-    await chrome.action.setBadgeTextColor({ color: "#ffffff" });
-  }
+async function updateBadge(count, { isError = false, items = [], checkedAt = null } = {}) {
+  const text = isError || count <= 0 ? "" : String(count);
 
   if (isError) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#a00000" });
+    await chrome.action.setBadgeText({ text: "" });
+
+    if (chrome.action.setBadgeTextColor) {
+      await chrome.action.setBadgeTextColor({ color: "#ffffff" });
+    }
+
     await chrome.action.setIcon({
       path: {
         16: "icons/icon-16-error.png",
         32: "icons/icon-32-error.png",
       },
     });
-  } else {
-    await chrome.action.setIcon({
-      path: {
-        16: "icons/icon-16.png",
-        32: "icons/icon-32.png",
-      },
-    });
+    return;
+  }
+
+  await chrome.action.setIcon({
+    path: {
+      16: "icons/icon-16.png",
+      32: "icons/icon-32.png",
+    },
+  });
+
+  if (count <= 0) {
+    await chrome.action.setBadgeText({ text: "" });
+    return;
+  }
+
+  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
+  const style = BADGE_STYLES[urgency] ?? BADGE_STYLES.gray;
+
+  await chrome.action.setBadgeBackgroundColor({ color: style.background });
+  await chrome.action.setBadgeText({ text });
+
+  if (chrome.action.setBadgeTextColor) {
+    await chrome.action.setBadgeTextColor({ color: style.text });
   }
 }
 

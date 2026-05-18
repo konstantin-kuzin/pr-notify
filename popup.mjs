@@ -1,3 +1,10 @@
+import {
+  BADGE_STYLES,
+  getBadgeUrgencyFromItems,
+  getItemWorkingTimeUrgency,
+  getWorkingElapsedMinutes,
+} from "./working-time.mjs";
+
 const STORAGE_KEY = "prState";
 const ADO_CONFIG_KEY = "adoConfig";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
@@ -95,6 +102,9 @@ function render() {
   } else {
     countBadge.classList.remove("hidden");
     countBadge.textContent = String(currentState.count ?? 0);
+    applyCountBadgeStyle(
+      getBadgeUrgencyFromItems(currentState.items, currentState.lastCheckedAt),
+    );
   }
 
   lastUpdated.textContent = `Последняя проверка: ${formatTimestamp(currentState.lastCheckedAt)}`;
@@ -156,19 +166,7 @@ function hasAnyConfiguredGroups(config) {
     ? config.selectedGroupIds
     : [];
 
-  if (selectedGroupIds.some((id) => String(id ?? "").trim())) {
-    return true;
-  }
-
-  const selectedTeamIds = Array.isArray(config.selectedTeamIds)
-    ? config.selectedTeamIds
-    : [];
-
-  if (selectedTeamIds.some((id) => String(id ?? "").trim())) {
-    return true;
-  }
-
-  return String(config.teamReviewerIds ?? "").trim().length > 0;
+  return selectedGroupIds.some((id) => String(id ?? "").trim());
 }
 
 async function refreshNow() {
@@ -218,7 +216,7 @@ function createItemElement(item) {
   listItem.className = "popup__item";
   const isTechPR = isTechPullRequest(item.description);
 
-  const stale = isStalePullRequest(item, currentState.lastCheckedAt);
+  const timeUrgency = getItemWorkingTimeUrgency(item, currentState.lastCheckedAt);
 
   const itemMain = document.createElement("div");
   itemMain.className = "popup__item-main";
@@ -252,7 +250,7 @@ function createItemElement(item) {
 
   const author = document.createElement("p");
   author.className = "popup__author";
-  fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, stale);
+  fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency);
 
   authorRow.append(author);
 
@@ -459,9 +457,9 @@ function formatTimestamp(timestamp) {
 
 /**
  * @param {HTMLParagraphElement} el
- * @param {boolean} stale
+ * @param {"yellow"|"orange"|"red"|null} timeUrgency
  */
-function fillAuthorMetaParagraph(el, item, checkedAt, stale) {
+function fillAuthorMetaParagraph(el, item, checkedAt, timeUrgency) {
   const authorName = item.author || "Автор не определён";
   const relativeTime = formatElapsedSince(item.updatedAt ?? item.createdAt, checkedAt);
 
@@ -482,8 +480,8 @@ function fillAuthorMetaParagraph(el, item, checkedAt, stale) {
 
   const timeSpan = document.createElement("span");
   timeSpan.className = "popup__author-time";
-  if (stale) {
-    timeSpan.classList.add("popup__author-time--stale");
+  if (timeUrgency) {
+    timeSpan.classList.add(`popup__author-time--${timeUrgency}`);
   }
   timeSpan.textContent = relativeTime;
 
@@ -491,7 +489,7 @@ function fillAuthorMetaParagraph(el, item, checkedAt, stale) {
 }
 
 function formatElapsedSince(createdAt, checkedAt) {
-  const totalMinutes = getElapsedMinutes(createdAt, checkedAt);
+  const totalMinutes = getWorkingElapsedMinutes(createdAt, checkedAt);
 
   if (totalMinutes === null) {
     return "";
@@ -511,35 +509,11 @@ function formatElapsedSince(createdAt, checkedAt) {
   return `${hours} ч ${minutes} мин`;
 }
 
-function isStalePullRequest(item, checkedAt) {
-  const totalMinutes = getElapsedMinutes(item.updatedAt ?? item.createdAt, checkedAt);
-
-  if (totalMinutes === null) {
-    return false;
-  }
-
-  return totalMinutes > 48 * 60;
-}
-
-function getElapsedMinutes(createdAt, checkedAt) {
-  if (!createdAt || !checkedAt) {
-    return null;
-  }
-
-  const createdAtDate = new Date(createdAt);
-  const checkedAtDate = new Date(checkedAt);
-
-  if (Number.isNaN(createdAtDate.getTime()) || Number.isNaN(checkedAtDate.getTime())) {
-    return null;
-  }
-
-  const diffMs = checkedAtDate.getTime() - createdAtDate.getTime();
-
-  if (diffMs < 0) {
-    return null;
-  }
-
-  return Math.floor(diffMs / 60000);
+function applyCountBadgeStyle(urgency) {
+  const style = BADGE_STYLES[urgency] ?? BADGE_STYLES.gray;
+  countBadge.style.backgroundColor = style.background;
+  countBadge.style.borderColor = style.background;
+  countBadge.style.color = style.text;
 }
 
 function escapeHtml(s) {
@@ -920,5 +894,5 @@ function isTechPullRequest(description) {
     return false;
   }
 
-  return /те[хx]\s*п[рp]/i.test(description);
+  return /(те[хx]\s*п[рp]|технический\s*п[рp])/i.test(description);
 }

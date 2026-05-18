@@ -30,22 +30,10 @@ export async function loadAdoConfig() {
   const partial = stored[ADO_CONFIG_KEY] ?? {};
   const raw = { ...DEFAULT_ADO_CONFIG, ...partial };
 
-  let selectedGroupIds = normalizeSelectedIds(partial.selectedGroupIds);
-
-  if (selectedGroupIds.length === 0) {
-    selectedGroupIds = normalizeSelectedIds(partial.selectedTeamIds);
-  }
-
-  if (selectedGroupIds.length === 0 && partial.teamReviewerIds?.trim()) {
-    selectedGroupIds = parseTeamReviewerIds(partial.teamReviewerIds);
-  }
-
-  const { savedGroupSearchPhrases: _legacySearchPhrases, ...rest } = raw;
-
   return {
-    ...rest,
-    selectedGroupIds,
-    selectedGroupLabels: normalizeSelectedGroupLabels(rest.selectedGroupLabels),
+    ...raw,
+    selectedGroupIds: normalizeSelectedIds(partial.selectedGroupIds),
+    selectedGroupLabels: normalizeSelectedGroupLabels(raw.selectedGroupLabels),
   };
 }
 
@@ -81,24 +69,6 @@ function normalizeSelectedIds(value) {
   }
 
   return value.map((id) => String(id ?? "").trim()).filter(Boolean);
-}
-
-export async function saveAdoConfig(partial) {
-  const current = await loadAdoConfig();
-  const next = { ...current, ...partial };
-  await chrome.storage.local.set({ [ADO_CONFIG_KEY]: next });
-  return next;
-}
-
-export function parseTeamReviewerIds(raw) {
-  if (typeof raw !== "string" || !raw.trim()) {
-    return [];
-  }
-
-  return raw
-    .split(/[,;\s]+/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
 }
 
 export function validateAdoConfig(config) {

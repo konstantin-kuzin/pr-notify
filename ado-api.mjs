@@ -1,6 +1,5 @@
 import {
   normalizeApiRoot,
-  parseTeamReviewerIds,
   resolveApiVersion,
 } from "./ado-config.mjs";
 
@@ -11,6 +10,7 @@ const IDENTITY_BATCH_SIZE = 40;
 const REVIEWER_GROUPS_CACHE_TTL_MS = 5 * 60 * 1000;
 const reviewerGroupsCache = new Map();
 const commitTimestampCache = new Map();
+const pushTimestampCache = new Map();
 
 /**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
@@ -221,15 +221,6 @@ async function listActivePullRequests(config, reviewerId = null) {
   return all;
 }
 
-/**
- * Все активные PR репозитория (без фильтра по ревьюеру). Может быть очень медленно при большом числе активных PR.
- *
- * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
- */
-export async function listAllActivePullRequests(config) {
-  return listActivePullRequests(config, null);
-}
-
 function dedupePullRequestsById(pullRequests) {
   const byId = new Map();
 
@@ -275,6 +266,88 @@ function commitTimestampCacheKey(config, project, repo, commitId) {
   ].join("|");
 }
 
+function pushTimestampCacheKey(config, project, repo, pushId) {
+  return [
+    normalizeApiRoot(config.apiRoot),
+    resolveApiVersion(config),
+    String(project),
+    String(repo),
+    String(pushId),
+  ].join("|");
+}
+
+function pickPushMeta(ref) {
+  const push = ref?.push ?? ref?.Push;
+
+  if (!push || typeof push !== "object") {
+    return { date: null, pushId: null };
+  }
+
+  const date = normalizeIsoDate(push.date ?? push.Date ?? "");
+  const rawPushId = push.pushId ?? push.PushId;
+  const pushId = rawPushId == null || rawPushId === "" ? null : rawPushId;
+
+  return { date, pushId };
+}
+
+function pickAuthorCommitterTimestamp(ref) {
+  if (!ref || typeof ref !== "object") {
+    return "";
+  }
+
+  const author = ref.author ?? ref.Author;
+  const committer = ref.committer ?? ref.Committer;
+
+  return normalizeIsoDate(
+    author?.date ?? author?.Date ?? committer?.date ?? committer?.Date ?? "",
+  ) ?? "";
+}
+
+async function fetchPushTimestamp(config, project, repo, pushId) {
+  const normalizedPushId = String(pushId ?? "").trim();
+
+  if (!normalizedPushId) {
+    return "";
+  }
+
+  const cacheKey = pushTimestampCacheKey(config, project, repo, normalizedPushId);
+
+  if (pushTimestampCache.has(cacheKey)) {
+    return pushTimestampCache.get(cacheKey);
+  }
+
+  const projectSeg = encodeURIComponent(String(project).trim());
+  const repoSeg = encodeURIComponent(String(repo).trim());
+  const pushSeg = encodeURIComponent(normalizedPushId);
+  const apiVersion = encodeURIComponent(resolveApiVersion(config));
+  const path = `${projectSeg}/_apis/git/repositories/${repoSeg}/pushes/${pushSeg}?api-version=${apiVersion}`;
+  const push = await adoFetch(config, path);
+  const timestamp = normalizeIsoDate(push?.date ?? push?.Date ?? "") ?? "";
+
+  pushTimestampCache.set(cacheKey, timestamp);
+  return timestamp;
+}
+
+/** Время пуша: inline `push.date`, иначе `GET .../pushes/{pushId}`. Без fallback на author. */
+async function resolvePushTimestampOnly(config, project, repo, ref) {
+  const { date, pushId } = pickPushMeta(ref);
+
+  if (date) {
+    return date;
+  }
+
+  if (pushId == null) {
+    return "";
+  }
+
+  try {
+    return await fetchPushTimestamp(config, project, repo, pushId);
+  } catch (error) {
+    logAdoError(`fetchPushTimestamp ${pushId}`, error);
+    return "";
+  }
+}
+
 async function fetchCommitTimestamp(config, project, repo, commitId) {
   const cacheKey = commitTimestampCacheKey(config, project, repo, commitId);
 
@@ -288,9 +361,8 @@ async function fetchCommitTimestamp(config, project, repo, commitId) {
   const apiVersion = encodeURIComponent(resolveApiVersion(config));
   const path = `${projectSeg}/_apis/git/repositories/${repoSeg}/commits/${commitSeg}?api-version=${apiVersion}`;
   const commit = await adoFetch(config, path);
-  const timestamp = normalizeIsoDate(
-    commit?.author?.date ?? commit?.committer?.date ?? "",
-  );
+  const pushTimestamp = await resolvePushTimestampOnly(config, project, repo, commit);
+  const timestamp = pushTimestamp || pickAuthorCommitterTimestamp(commit);
 
   commitTimestampCache.set(cacheKey, timestamp);
   return timestamp;
@@ -316,12 +388,8 @@ async function fetchGitPullRequestById(config, project, repo, pullRequestId) {
   return adoFetch(config, path);
 }
 
-function timestampFromGitCommitRef(ref) {
-  return normalizeIsoDate(ref?.author?.date ?? ref?.committer?.date ?? "");
-}
-
 /**
- * Дата последнего source-коммита: из детального PR / массива commits, иначе отдельный GET commit.
+ * Время пуша source: сначала push (inline / GET push), затем GET commit, в конце — дата коммита.
  */
 async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, repo) {
   const sourceId = String(
@@ -334,31 +402,45 @@ async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, 
     return "";
   }
 
-  let t = timestampFromGitCommitRef(detail?.lastMergeSourceCommit);
-
-  if (t) {
-    return t;
-  }
-
   const commits = Array.isArray(detail?.commits) ? detail.commits : [];
   const hit = commits.find(
-    (c) => String(c?.commitId ?? "").toLowerCase() === sourceId.toLowerCase(),
+    (c) => String(c?.commitId ?? c?.CommitId ?? "").toLowerCase() === sourceId.toLowerCase(),
   );
-  t = timestampFromGitCommitRef(hit);
+  const commitRefs = [detail?.lastMergeSourceCommit, hit].filter(
+    (ref) => ref && typeof ref === "object",
+  );
 
-  if (t) {
-    return t;
+  for (const ref of commitRefs) {
+    const pushTimestamp = await resolvePushTimestampOnly(config, project, repo, ref);
+
+    if (pushTimestamp) {
+      return pushTimestamp;
+    }
   }
 
   try {
-    return await fetchCommitTimestamp(config, project, repo, sourceId);
+    const fromCommit = await fetchCommitTimestamp(config, project, repo, sourceId);
+
+    if (fromCommit) {
+      return fromCommit;
+    }
   } catch (_error) {
-    return "";
+    // fallback на даты из PR ниже
   }
+
+  for (const ref of commitRefs) {
+    const authorTimestamp = pickAuthorCommitterTimestamp(ref);
+
+    if (authorTimestamp) {
+      return authorTimestamp;
+    }
+  }
+
+  return "";
 }
 
 /**
- * Обогащает PR полным description и временем последнего source-коммита (один GET на PR с includeCommits).
+ * Обогащает PR полным description и временем пуша source (push.date / GET push / GET commit).
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
@@ -809,29 +891,9 @@ async function resolveIdentityDescriptors(config, descriptors) {
 }
 
 function normalizeConfiguredGroupIds(config) {
-  const selectedGroupIds = Array.isArray(config.selectedGroupIds)
+  return Array.isArray(config.selectedGroupIds)
     ? config.selectedGroupIds.map((id) => normalizePlainText(id)).filter(Boolean)
     : [];
-
-  if (selectedGroupIds.length > 0) {
-    return selectedGroupIds;
-  }
-
-  const legacySelectedTeamIds = Array.isArray(config.selectedTeamIds)
-    ? config.selectedTeamIds.map((id) => normalizePlainText(id)).filter(Boolean)
-    : [];
-
-  if (legacySelectedTeamIds.length > 0) {
-    return legacySelectedTeamIds;
-  }
-
-  const legacyManualIds = parseTeamReviewerIds(config.teamReviewerIds ?? "");
-
-  if (legacyManualIds.length > 0) {
-    return legacyManualIds.map((id) => normalizePlainText(id)).filter(Boolean);
-  }
-
-  return [];
 }
 
 /**
@@ -915,24 +977,6 @@ export async function fetchMyReviewerGroupsWithDiagnostics(config, currentUserId
       error: err,
     };
   }
-}
-
-/**
- * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
- * @param {string | null} [currentUserId]
- */
-export async function fetchMyReviewerGroups(config, currentUserId = null) {
-  const { groups } = await fetchMyReviewerGroupsWithDiagnostics(config, currentUserId);
-  return groups;
-}
-
-/**
- * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
- * @param {string | null} [currentUserId]
- */
-export async function fetchMyReviewerGroupIds(config, currentUserId = null) {
-  const groups = await fetchMyReviewerGroups(config, currentUserId);
-  return groups.map((group) => group.id);
 }
 
 function buildIdentitySearchTerms(filterValue) {
@@ -1078,21 +1122,17 @@ export function getExtensionReviewerContext(config, myId) {
   const currentUserId = String(myId);
   const selectedGroupIds = normalizeConfiguredGroupIds(config);
 
-  let allowedReviewerIds;
-  let matchedSectionTitle;
-
   if (selectedGroupIds.length > 0) {
-    allowedReviewerIds = [currentUserId, ...selectedGroupIds];
-    matchedSectionTitle = "Выбранные reviewer-группы (API)";
-  } else if (Array.isArray(config.selectedTeamIds) && config.selectedTeamIds.length > 0) {
-    allowedReviewerIds = [currentUserId, ...config.selectedTeamIds.map(String)];
-    matchedSectionTitle = "Выбранные reviewer-группы (legacy)";
-  } else {
-    allowedReviewerIds = [currentUserId];
-    matchedSectionTitle = "Назначено мне (API)";
+    return {
+      allowedReviewerIds: [currentUserId, ...selectedGroupIds],
+      matchedSectionTitle: "Выбранные reviewer-группы",
+    };
   }
 
-  return { allowedReviewerIds, matchedSectionTitle };
+  return {
+    allowedReviewerIds: [currentUserId],
+    matchedSectionTitle: "Назначено мне",
+  };
 }
 
 /**
