@@ -820,73 +820,172 @@ function applyInlineMarkdown(s) {
 }
 
 /**
+ * @param {number} level
+ */
+function markdownHeadingTag(level) {
+  if (level <= 2) {
+    return "h3";
+  }
+
+  if (level <= 4) {
+    return "h4";
+  }
+
+  return "h5";
+}
+
+/**
+ * @param {string} line
+ */
+function parseMarkdownHeadingLine(line) {
+  const trimmed = line.trim();
+
+  if (!/^#{1,6}\s+/.test(trimmed)) {
+    return null;
+  }
+
+  const level = trimmed.match(/^#+/)?.[0].length ?? 1;
+  const content = trimmed.replace(/^#{1,6}\s+/, "");
+  const tag = markdownHeadingTag(level);
+
+  return {
+    tag,
+    level,
+    html: `<${tag} class="popup__md-heading popup__md-heading--l${level}">${applyInlineMarkdown(content)}</${tag}>`,
+  };
+}
+
+/**
+ * @param {string[]} lines
+ */
+function renderMarkdownBlockLines(lines) {
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    const heading = parseMarkdownHeadingLine(trimmed);
+
+    if (heading) {
+      out.push(heading.html);
+      i += 1;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items = [];
+
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
+        const body = lines[i].trim().replace(/^[-*]\s+/, "");
+        items.push(`<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`);
+        i += 1;
+      }
+
+      out.push(`<ul class="popup__md-ul">${items.join("")}</ul>`);
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items = [];
+
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
+        const body = lines[i].trim().replace(/^\d+\.\s+/, "");
+        items.push(`<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`);
+        i += 1;
+      }
+
+      out.push(`<ol class="popup__md-ol">${items.join("")}</ol>`);
+      continue;
+    }
+
+    const paraLines = [];
+
+    while (i < lines.length) {
+      const lineTrimmed = lines[i].trim();
+
+      if (!lineTrimmed) {
+        break;
+      }
+
+      if (parseMarkdownHeadingLine(lineTrimmed)) {
+        break;
+      }
+
+      if (/^[-*]\s+/.test(lineTrimmed) || /^\d+\.\s+/.test(lineTrimmed)) {
+        break;
+      }
+
+      paraLines.push(lines[i]);
+      i += 1;
+    }
+
+    if (paraLines.length > 0) {
+      const content = paraLines.join("\n").trim();
+      out.push(
+        `<p class="popup__md-p">${applyInlineMarkdown(content).replace(/\n/g, "<br>")}</p>`,
+      );
+    }
+  }
+
+  return out.join("");
+}
+
+/**
+ * @param {string} block
+ */
+function renderMarkdownBlock(block) {
+  const b = block.trim();
+
+  if (!b) {
+    return "";
+  }
+
+  if (/^(-{3,}|\*{3,})$/.test(b)) {
+    return "<hr class=\"popup__md-hr\">";
+  }
+
+  const lines = b.split("\n");
+  const listLines = lines.filter((ln) => ln.trim() !== "");
+
+  if (
+    listLines.length > 0
+    && listLines.every((ln) => /^[-*]\s+/.test(ln.trim()))
+  ) {
+    const items = listLines.map((ln) => {
+      const body = ln.trim().replace(/^[-*]\s+/, "");
+      return `<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`;
+    });
+    return `<ul class="popup__md-ul">${items.join("")}</ul>`;
+  }
+
+  if (listLines.length > 0 && listLines.every((ln) => /^\d+\.\s+/.test(ln.trim()))) {
+    const items = listLines.map((ln) => {
+      const body = ln.trim().replace(/^\d+\.\s+/, "");
+      return `<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`;
+    });
+    return `<ol class="popup__md-ol">${items.join("")}</ol>`;
+  }
+
+  return renderMarkdownBlockLines(lines);
+}
+
+/**
  * @param {string | undefined | null} raw
  */
 function renderMarkdown(raw) {
   const text = escapeHtml(preprocessMarkdown(raw ?? ""));
   const blocks = text.split(/\n\n+/);
-  const out = [];
 
-  for (const block of blocks) {
-    const b = block.trim();
-
-    if (!b) {
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,})$/.test(b)) {
-      out.push("<hr class=\"popup__md-hr\">");
-      continue;
-    }
-
-    const lines = b.split("\n");
-    const first = lines[0] ?? "";
-
-    if (/^#{1,6}\s+/.test(first)) {
-      const level = first.match(/^#+/)?.[0].length ?? 1;
-      const content = first.replace(/^#{1,6}\s+/, "");
-      const tag = level <= 2 ? "h3" : "h4";
-      out.push(`<${tag} class="popup__md-heading">${applyInlineMarkdown(content)}</${tag}>`);
-
-      if (lines.length > 1) {
-        const rest = lines.slice(1).join("\n");
-        out.push(
-          `<p class="popup__md-p">${applyInlineMarkdown(rest).replace(/\n/g, "<br>")}</p>`,
-        );
-      }
-
-      continue;
-    }
-
-    const listLines = lines.filter((ln) => ln.trim() !== "");
-
-    if (
-      listLines.length > 0
-      && listLines.every((ln) => /^[-*]\s+/.test(ln.trim()))
-    ) {
-      const items = listLines.map((ln) => {
-        const body = ln.trim().replace(/^[-*]\s+/, "");
-        return `<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`;
-      });
-      out.push(`<ul class="popup__md-ul">${items.join("")}</ul>`);
-      continue;
-    }
-
-    const numbered = listLines.every((ln) => /^\d+\.\s+/.test(ln.trim()));
-
-    if (listLines.length > 0 && numbered) {
-      const items = listLines.map((ln) => {
-        const body = ln.trim().replace(/^\d+\.\s+/, "");
-        return `<li class="popup__md-li">${applyInlineMarkdown(body)}</li>`;
-      });
-      out.push(`<ol class="popup__md-ol">${items.join("")}</ol>`);
-      continue;
-    }
-
-    out.push(`<p class="popup__md-p">${applyInlineMarkdown(b).replace(/\n/g, "<br>")}</p>`);
-  }
-
-  return out.join("");
+  return blocks
+    .map((block) => renderMarkdownBlock(block))
+    .filter(Boolean)
+    .join("");
 }
 
 function isTechPullRequest(description) {
