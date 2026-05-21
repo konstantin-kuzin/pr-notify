@@ -11,6 +11,7 @@ import {
   listActivePullRequestsForAllowedReviewers,
   logAdoError,
   mapPullRequestToItem,
+  resolveConfiguredGroupMemberIds,
   setReviewerVoteApprove,
   sortPullRequestsOldestFirst,
 } from "./ado-api.mjs";
@@ -166,7 +167,12 @@ async function refreshPullRequests(trigger) {
       rawPullRequests,
       identity.id,
     );
-    const enrichedPullRequests = await attachPullRequestLastCommitTimes(config, filtered);
+    const groupMemberIds = await resolveConfiguredGroupMemberIds(config);
+    const enrichedPullRequests = await attachPullRequestLastCommitTimes(
+      config,
+      filtered,
+      groupMemberIds,
+    );
 
     const items = sortPullRequestsOldestFirst(
       enrichedPullRequests

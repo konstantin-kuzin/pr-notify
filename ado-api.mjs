@@ -8,7 +8,9 @@ const MAX_RETRIES = 2;
 const RETRY_BASE_MS = 900;
 const IDENTITY_BATCH_SIZE = 40;
 const REVIEWER_GROUPS_CACHE_TTL_MS = 5 * 60 * 1000;
+const GROUP_MEMBER_IDS_CACHE_TTL_MS = 5 * 60 * 1000;
 const reviewerGroupsCache = new Map();
+const groupMemberIdsCache = new Map();
 const commitTimestampCache = new Map();
 const pushTimestampCache = new Map();
 
@@ -439,13 +441,243 @@ async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, 
   return "";
 }
 
+function groupMemberIdsCacheKey(config, groupIds) {
+  return [
+    normalizeApiRoot(config.apiRoot),
+    resolveApiVersion(config),
+    [...groupIds].sort().join(","),
+  ].join("|");
+}
+
+function isIdentityUser(identity) {
+  if (!identity || typeof identity !== "object") {
+    return false;
+  }
+
+  if (identity.isContainer === true) {
+    return false;
+  }
+
+  const schemaClassName = getIdentityProperty(identity, "SchemaClassName");
+
+  if (schemaClassName) {
+    return schemaClassName === "User";
+  }
+
+  return !identity.isContainer;
+}
+
 /**
- * Обогащает PR полным description и временем пуша source (push.date / GET push / GET commit).
+ * User id всех участников выбранных reviewer-групп (ExpandedDown через Identities API).
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @returns {Promise<Set<string>>}
+ */
+export async function resolveConfiguredGroupMemberIds(config) {
+  const groupIds = normalizeConfiguredGroupIds(config);
+
+  if (groupIds.length === 0) {
+    return new Set();
+  }
+
+  const cacheKey = groupMemberIdsCacheKey(config, groupIds);
+  const cached = groupMemberIdsCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.updatedAt <= GROUP_MEMBER_IDS_CACHE_TTL_MS) {
+    return cached.memberIds;
+  }
+
+  const memberIds = new Set();
+
+  for (const groupId of groupIds) {
+    try {
+      const query = new URLSearchParams({
+        identityIds: groupId,
+        queryMembership: "ExpandedDown",
+        "api-version": resolveApiVersion(config),
+      });
+      const data = await adoFetchIdentitiesApi(config, query);
+      const identities = Array.isArray(data?.value) ? data.value : [];
+      let foundUsers = false;
+
+      for (const identity of identities) {
+        if (!isIdentityUser(identity)) {
+          continue;
+        }
+
+        const id = normalizePlainText(identity?.id);
+
+        if (id) {
+          memberIds.add(id);
+          foundUsers = true;
+        }
+      }
+
+      if (foundUsers) {
+        continue;
+      }
+
+      const groupIdentity = identities.find(
+        (identity) => normalizePlainText(identity?.id) === groupId,
+      );
+      const nestedMemberIds = [
+        ...(Array.isArray(groupIdentity?.memberIds) ? groupIdentity.memberIds : []),
+        ...(Array.isArray(groupIdentity?.members) ? groupIdentity.members : [])
+          .flatMap((entry) => getDescriptorCandidates(entry)),
+      ]
+        .map((value) => normalizePlainText(value))
+        .filter(Boolean);
+
+      if (nestedMemberIds.length === 0) {
+        continue;
+      }
+
+      const resolvedMembers = await resolveIdentityDescriptors(config, nestedMemberIds);
+
+      for (const identity of resolvedMembers) {
+        if (!isIdentityUser(identity)) {
+          continue;
+        }
+
+        const id = normalizePlainText(identity?.id);
+
+        if (id) {
+          memberIds.add(id);
+        }
+      }
+    } catch (error) {
+      logAdoError(`resolveConfiguredGroupMemberIds ${groupId}`, error);
+    }
+  }
+
+  groupMemberIdsCache.set(cacheKey, {
+    memberIds,
+    updatedAt: Date.now(),
+  });
+
+  return memberIds;
+}
+
+/**
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {string} project
+ * @param {string} repo
+ * @param {number | string} pullRequestId
+ */
+async function fetchGitPullRequestThreads(config, project, repo, pullRequestId) {
+  const projectSeg = encodeURIComponent(String(project).trim());
+  const repoSeg = encodeURIComponent(String(repo).trim());
+  const prIdSeg = encodeURIComponent(String(pullRequestId).trim());
+  const query = new URLSearchParams({
+    "api-version": resolveApiVersion(config),
+  });
+  const path = `${projectSeg}/_apis/git/repositories/${repoSeg}/pullRequests/${prIdSeg}/threads?${query.toString()}`;
+  const data = await adoFetch(config, path);
+  return Array.isArray(data?.value) ? data.value : [];
+}
+
+function isUserPullRequestComment(comment) {
+  if (!comment || typeof comment !== "object" || comment.isDeleted === true) {
+    return false;
+  }
+
+  const commentType = normalizePlainText(comment.commentType ?? comment.CommentType).toLowerCase();
+
+  if (commentType === "system") {
+    return false;
+  }
+
+  const author = comment.author ?? comment.Author;
+
+  if (!author || typeof author !== "object" || author.isContainer === true) {
+    return false;
+  }
+
+  return Boolean(normalizePlainText(author.id ?? author.Id));
+}
+
+/**
+ * Последний комментарий участника группы, опубликованный строго после `afterIso`.
+ *
+ * @param {Array<any>} threads
+ * @param {Set<string>} memberIds
+ * @param {string|null|undefined} afterIso
+ */
+function resolveLatestGroupMemberCommentAfter(threads, memberIds, afterIso) {
+  if (!afterIso || memberIds.size === 0 || !Array.isArray(threads)) {
+    return "";
+  }
+
+  const afterTimestamp = Date.parse(afterIso);
+
+  if (!Number.isFinite(afterTimestamp)) {
+    return "";
+  }
+
+  let latest = "";
+  let latestTimestamp = afterTimestamp;
+
+  for (const thread of threads) {
+    if (thread?.isDeleted === true) {
+      continue;
+    }
+
+    const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+
+    for (const comment of comments) {
+      if (!isUserPullRequestComment(comment)) {
+        continue;
+      }
+
+      const authorId = normalizePlainText(
+        comment.author?.id ?? comment.Author?.Id ?? "",
+      );
+
+      if (!memberIds.has(authorId)) {
+        continue;
+      }
+
+      const publishedAt = normalizeIsoDate(
+        comment.publishedDate
+          ?? comment.PublishedDate
+          ?? comment.lastUpdatedDate
+          ?? comment.LastUpdatedDate
+          ?? "",
+      );
+
+      if (!publishedAt) {
+        continue;
+      }
+
+      const publishedTimestamp = Date.parse(publishedAt);
+
+      if (!Number.isFinite(publishedTimestamp) || publishedTimestamp <= afterTimestamp) {
+        continue;
+      }
+
+      if (publishedTimestamp > latestTimestamp) {
+        latest = publishedAt;
+        latestTimestamp = publishedTimestamp;
+      }
+    }
+  }
+
+  return latest;
+}
+
+/**
+ * Обогащает PR полным description, временем пуша source и (опционально) последним
+ * комментарием участника reviewer-группы после последнего пуша.
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
+ * @param {Set<string>|Iterable<string>|null|undefined} [groupMemberIds]
  */
-export async function attachPullRequestLastCommitTimes(config, pullRequests) {
+export async function attachPullRequestLastCommitTimes(config, pullRequests, groupMemberIds = null) {
+  const memberIds = groupMemberIds instanceof Set
+    ? groupMemberIds
+    : new Set(groupMemberIds ?? []);
+
   return Promise.all(
     pullRequests.map(async (pullRequest) => {
       const prId = pullRequest?.pullRequestId;
@@ -484,6 +716,25 @@ export async function attachPullRequestLastCommitTimes(config, pullRequests) {
 
         if (lastCommitAt) {
           next.lastCommitAt = lastCommitAt;
+        }
+
+        const pushBaseline = lastCommitAt || normalizeIsoDate(pullRequest?.creationDate);
+
+        if (memberIds.size > 0 && pushBaseline) {
+          try {
+            const threads = await fetchGitPullRequestThreads(config, project, repo, prId);
+            const lastGroupCommentAt = resolveLatestGroupMemberCommentAfter(
+              threads,
+              memberIds,
+              pushBaseline,
+            );
+
+            if (lastGroupCommentAt) {
+              next.lastGroupCommentAt = lastGroupCommentAt;
+            }
+          } catch (error) {
+            logAdoError(`fetchGitPullRequestThreads ${prId}`, error);
+          }
         }
 
         return next;
@@ -1196,6 +1447,7 @@ export function mapPullRequestToItem(pr, config) {
   const avatarUrl = pickPullRequestAuthorAvatarUrl(pr?.createdBy, config.apiRoot);
   const createdAt = normalizeIsoDate(pr?.creationDate);
   const updatedAt = pickLatestIsoDate(
+    normalizeIsoDate(pr?.lastGroupCommentAt),
     normalizeIsoDate(pr?.lastCommitAt),
     createdAt,
   );
