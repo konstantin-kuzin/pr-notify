@@ -11,6 +11,10 @@ const MOSCOW_OFFSET = "+03:00";
  * @returns {number|null}
  */
 export function getWorkingElapsedMinutes(from, to) {
+  if (from == null || to == null || from === "" || to === "") {
+    return null;
+  }
+
   const start = from instanceof Date ? from : new Date(from);
   const end = to instanceof Date ? to : new Date(to);
 
@@ -126,12 +130,60 @@ export function getWorkingTimeUrgency(minutes) {
 }
 
 /**
- * @param {{ updatedAt?: string, createdAt?: string }} item
+ * Есть ли коммиты/пуши позже последнего комментария участника группы.
+ * Без комментария считаем, что «ожидание ревью» — счётчик включается.
+ *
+ * @param {{ lastCommitAt?: string, lastGroupCommentAt?: string }} item
+ * @returns {boolean}
+ */
+export function hasUpdatesAfterLastGroupComment(item) {
+  const commentAt = item?.lastGroupCommentAt;
+
+  if (!commentAt) {
+    return true;
+  }
+
+  const commitAt = item?.lastCommitAt;
+
+  if (!commitAt) {
+    return false;
+  }
+
+  const commentTimestamp = Date.parse(commentAt);
+  const commitTimestamp = Date.parse(commitAt);
+
+  if (!Number.isFinite(commentTimestamp) || !Number.isFinite(commitTimestamp)) {
+    return true;
+  }
+
+  return commitTimestamp > commentTimestamp;
+}
+
+/**
+ * Точка отсчёта рабочего времени для PR или `null`, если счётчик не нужен.
+ *
+ * @param {{ lastCommitAt?: string, lastGroupCommentAt?: string, createdAt?: string }} item
+ * @returns {string|null|undefined}
+ */
+export function getItemWorkingTimeFrom(item) {
+  if (!hasUpdatesAfterLastGroupComment(item)) {
+    return null;
+  }
+
+  if (item?.lastGroupCommentAt && item?.lastCommitAt) {
+    return item.lastCommitAt;
+  }
+
+  return item?.lastCommitAt ?? item?.createdAt;
+}
+
+/**
+ * @param {{ updatedAt?: string, createdAt?: string, lastCommitAt?: string, lastGroupCommentAt?: string }} item
  * @param {string|null|undefined} checkedAt
  * @returns {"yellow"|"orange"|"red"|null}
  */
 export function getItemWorkingTimeUrgency(item, checkedAt) {
-  const from = item?.updatedAt ?? item?.createdAt;
+  const from = getItemWorkingTimeFrom(item);
 
   if (!from || !checkedAt) {
     return null;
@@ -142,7 +194,7 @@ export function getItemWorkingTimeUrgency(item, checkedAt) {
 
 /**
  * Уровень срочности бейджа по максимальному рабочему возрасту PR в списке.
- * @param {Array<{ updatedAt?: string, createdAt?: string }>} items
+ * @param {Array<{ updatedAt?: string, createdAt?: string, lastCommitAt?: string, lastGroupCommentAt?: string }>} items
  * @param {string|null|undefined} checkedAt
  * @returns {"gray"|"yellow"|"orange"|"red"}
  */
@@ -154,7 +206,12 @@ export function getBadgeUrgencyFromItems(items, checkedAt) {
   let maxMinutes = 0;
 
   for (const item of items) {
-    const from = item?.updatedAt ?? item?.createdAt;
+    const from = getItemWorkingTimeFrom(item);
+
+    if (!from) {
+      continue;
+    }
+
     const minutes = getWorkingElapsedMinutes(from, checkedAt);
 
     if (minutes !== null && minutes > maxMinutes) {
@@ -163,4 +220,37 @@ export function getBadgeUrgencyFromItems(items, checkedAt) {
   }
 
   return getWorkingTimeUrgency(maxMinutes) ?? "gray";
+}
+
+/** PR без новых пушей после комментария — в конце списка; остальные — старые выше. */
+export function sortPullRequestsOldestFirst(items) {
+  return items
+    .map((item, index) => {
+      const sortKey = item.updatedAt ?? item.createdAt;
+      return {
+        item,
+        index,
+        waiting: hasUpdatesAfterLastGroupComment(item),
+        timestamp: sortKey ? Date.parse(sortKey) : Number.NaN,
+      };
+    })
+    .sort((left, right) => {
+      if (left.waiting !== right.waiting) {
+        return left.waiting ? -1 : 1;
+      }
+
+      const leftHasDate = Number.isFinite(left.timestamp);
+      const rightHasDate = Number.isFinite(right.timestamp);
+
+      if (leftHasDate && rightHasDate && left.timestamp !== right.timestamp) {
+        return left.timestamp - right.timestamp;
+      }
+
+      if (leftHasDate !== rightHasDate) {
+        return leftHasDate ? -1 : 1;
+      }
+
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
 }

@@ -1,7 +1,10 @@
 import {
   BADGE_STYLES,
+  getItemWorkingTimeFrom,
   getItemWorkingTimeUrgency,
   getWorkingElapsedMinutes,
+  hasUpdatesAfterLastGroupComment,
+  sortPullRequestsOldestFirst,
 } from "./working-time.mjs";
 
 const STORAGE_KEY = "prState";
@@ -167,7 +170,7 @@ function render() {
   emptyState.classList.add("hidden");
   emptySetupHint?.classList.add("hidden");
 
-  for (const item of currentState.items) {
+  for (const item of sortPullRequestsOldestFirst(currentState.items)) {
     itemsList.append(createItemElement(item));
   }
 }
@@ -493,18 +496,21 @@ function formatTimestamp(timestamp) {
  */
 function fillAuthorMetaParagraph(el, item, checkedAt, timeUrgency) {
   const authorName = item.author || "Автор не определён";
-  const relativeTime = formatElapsedSince(item.updatedAt ?? item.createdAt, checkedAt);
+  const hasNoUpdates = !hasUpdatesAfterLastGroupComment(item);
+  const relativeTime = hasNoUpdates
+    ? null
+    : formatElapsedSince(getItemWorkingTimeFrom(item), checkedAt);
 
   el.replaceChildren();
-
-  if (!relativeTime) {
-    el.textContent = authorName;
-    return;
-  }
 
   const nameSpan = document.createElement("span");
   nameSpan.className = "popup__author-name";
   nameSpan.textContent = authorName;
+
+  if (!relativeTime && !hasNoUpdates) {
+    el.append(nameSpan);
+    return;
+  }
 
   const sep = document.createElement("span");
   sep.className = "popup__author-sep";
@@ -512,10 +518,15 @@ function fillAuthorMetaParagraph(el, item, checkedAt, timeUrgency) {
 
   const timeSpan = document.createElement("span");
   timeSpan.className = "popup__author-time";
-  if (timeUrgency) {
-    timeSpan.classList.add(`popup__author-time--${timeUrgency}`);
+
+  if (hasNoUpdates) {
+    timeSpan.textContent = "Нет обновлений";
+  } else {
+    if (timeUrgency) {
+      timeSpan.classList.add(`popup__author-time--${timeUrgency}`);
+    }
+    timeSpan.textContent = relativeTime;
   }
-  timeSpan.textContent = relativeTime;
 
   el.append(nameSpan, sep, timeSpan);
 }

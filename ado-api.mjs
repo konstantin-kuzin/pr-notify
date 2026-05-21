@@ -1465,6 +1465,8 @@ export function mapPullRequestToItem(pr, config) {
     avatarUrl,
     createdAt,
     updatedAt,
+    lastCommitAt: normalizeIsoDate(pr?.lastCommitAt) || undefined,
+    lastGroupCommentAt: normalizeIsoDate(pr?.lastGroupCommentAt) || undefined,
     description,
     url,
   };
@@ -1494,33 +1496,7 @@ function pickLatestIsoDate(...values) {
   return latest;
 }
 
-/** Старые по дате обновления (`updatedAt ?? createdAt`) — выше в списке. */
-export function sortPullRequestsOldestFirst(items) {
-  return items
-    .map((item, index) => {
-      const sortKey = item.updatedAt ?? item.createdAt;
-      return {
-        item,
-        index,
-        timestamp: sortKey ? Date.parse(sortKey) : Number.NaN,
-      };
-    })
-    .sort((left, right) => {
-      const leftHasDate = Number.isFinite(left.timestamp);
-      const rightHasDate = Number.isFinite(right.timestamp);
-
-      if (leftHasDate && rightHasDate && left.timestamp !== right.timestamp) {
-        return left.timestamp - right.timestamp;
-      }
-
-      if (leftHasDate !== rightHasDate) {
-        return leftHasDate ? -1 : 1;
-      }
-
-      return left.index - right.index;
-    })
-    .map(({ item }) => item);
-}
+export { sortPullRequestsOldestFirst } from "./working-time.mjs";
 
 /**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
