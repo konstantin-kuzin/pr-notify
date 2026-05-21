@@ -22,6 +22,8 @@ const CHECK_INTERVAL_MINUTES = 10;
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const STORAGE_KEY = "prState";
+const UPDATE_STATE_KEY = "prUpdateState";
+const GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/konstantin-kuzin/pr-notify/main/manifest.json";
 const APPROVE_REFRESH_TIMEOUT_MS = 15_000;
 const APPROVE_REFRESH_INTERVAL_MS = 2_000;
 
@@ -108,6 +110,7 @@ async function restoreBadgeFromState() {
 
 async function bootstrap({ refresh, trigger }) {
   await ensureAlarm();
+  void checkForUpdates();
 
   const state = await getStoredState();
   const hasError = !!state.lastError;
@@ -233,6 +236,83 @@ async function saveState(state) {
   await chrome.storage.local.set({
     [STORAGE_KEY]: state,
   });
+}
+
+async function checkForUpdates() {
+  const localVersion = chrome.runtime.getManifest().version;
+  const checkedAt = new Date().toISOString();
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), 3000);
+
+  try {
+    const response = await fetch(GITHUB_MANIFEST_URL, {
+      cache: "no-store",
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub manifest HTTP ${response.status}`);
+    }
+
+    const remoteManifest = await response.json();
+    const latestVersion = typeof remoteManifest?.version === "string"
+      ? remoteManifest.version.trim()
+      : "";
+
+    if (!latestVersion) {
+      throw new Error("GitHub manifest does not contain version");
+    }
+
+    await chrome.storage.local.set({
+      [UPDATE_STATE_KEY]: {
+        checkedAt,
+        localVersion,
+        latestVersion,
+        hasUpdate: isRemoteVersionNewer(latestVersion, localVersion),
+        error: null,
+      },
+    });
+  } catch (error) {
+    await chrome.storage.local.set({
+      [UPDATE_STATE_KEY]: {
+        checkedAt,
+        localVersion,
+        latestVersion: "",
+        hasUpdate: false,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function isRemoteVersionNewer(remoteVersion, localVersion) {
+  const remoteParts = parseVersionParts(remoteVersion);
+  const localParts = parseVersionParts(localVersion);
+  const maxLength = Math.max(remoteParts.length, localParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const remotePart = remoteParts[index] ?? 0;
+    const localPart = localParts[index] ?? 0;
+
+    if (remotePart > localPart) {
+      return true;
+    }
+
+    if (remotePart < localPart) {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+function parseVersionParts(version) {
+  return String(version ?? "")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .map((part) => (Number.isFinite(part) ? part : 0));
 }
 
 const ICON_PATHS = {

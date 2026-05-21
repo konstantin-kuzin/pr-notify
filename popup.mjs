@@ -5,6 +5,7 @@ import {
 } from "./working-time.mjs";
 
 const STORAGE_KEY = "prState";
+const UPDATE_STATE_KEY = "prUpdateState";
 const ADO_CONFIG_KEY = "adoConfig";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
@@ -24,6 +25,7 @@ const emptySetupLink = document.querySelector("#empty-setup-link");
 const itemsList = document.querySelector("#items-list");
 const refreshButton = document.querySelector("#refresh-button");
 const optionsLink = document.querySelector("#options-link");
+const updateChip = document.querySelector("#update-chip");
 
 let isRefreshing = false;
 let transientMessage = "";
@@ -31,6 +33,7 @@ let transientMessageTone = "error";
 let transientMessageTimer = null;
 const approvingPullRequestIds = new Set();
 let currentState = { ...DEFAULT_STATE };
+let updateState = { hasUpdate: false, latestVersion: "" };
 let hasConfiguredGroups = false;
 
 void init();
@@ -51,6 +54,7 @@ function applyPopupMaxHeight() {
 async function init() {
   applyPopupMaxHeight();
   currentState = await loadState();
+  updateState = await loadUpdateState();
   hasConfiguredGroups = await loadHasConfiguredGroups();
   render();
   refreshButton.addEventListener("click", () => {
@@ -80,6 +84,11 @@ async function init() {
       hasConfiguredGroups = hasAnyConfiguredGroups(changes[ADO_CONFIG_KEY].newValue);
     }
 
+    if (changes[UPDATE_STATE_KEY]) {
+      updateState = normalizeUpdateState(changes[UPDATE_STATE_KEY].newValue);
+      renderUpdateChip();
+    }
+
     render();
   });
 }
@@ -90,6 +99,19 @@ async function loadState() {
   return {
     ...DEFAULT_STATE,
     ...(stored[STORAGE_KEY] ?? {}),
+  };
+}
+
+async function loadUpdateState() {
+  const stored = await chrome.storage.local.get(UPDATE_STATE_KEY);
+  return normalizeUpdateState(stored[UPDATE_STATE_KEY]);
+}
+
+function normalizeUpdateState(rawState) {
+  return {
+    hasUpdate: Boolean(rawState?.hasUpdate),
+    latestVersion:
+      typeof rawState?.latestVersion === "string" ? rawState.latestVersion : "",
   };
 }
 
@@ -114,6 +136,7 @@ function render() {
     "title",
     isRefreshing ? "Обновление выполняется" : "Обновить сейчас",
   );
+  renderUpdateChip();
 
   const hasTransientMessage = Boolean(transientMessage);
   const message = transientMessage || (
@@ -147,6 +170,18 @@ function render() {
   for (const item of currentState.items) {
     itemsList.append(createItemElement(item));
   }
+}
+
+function renderUpdateChip() {
+  if (!updateChip) {
+    return;
+  }
+
+  const latestVersion = updateState.latestVersion.trim();
+  const isVisible = updateState.hasUpdate && latestVersion;
+
+  updateChip.classList.toggle("hidden", !isVisible);
+  updateChip.textContent = isVisible ? `Новая версия - ${latestVersion}` : "";
 }
 
 async function loadHasConfiguredGroups() {

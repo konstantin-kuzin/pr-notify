@@ -65,18 +65,50 @@ body {
 }
 
 .popup__footer {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   flex-shrink: 0;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   padding: 8px 4px 4px;
 }
 
-.popup__github-link {
+.popup__github-link,
+.popup__options-link,
+.popup__update-chip {
   color: var(--muted);
   font: inherit;
   text-decoration: none;
+}
+
+.popup__github-link {
+  grid-column: 1;
+  justify-self: start;
+}
+
+.popup__update-chip {
+  grid-column: 2;
+  justify-self: center;
+  max-width: 240px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup__options-link {
+  grid-column: 3;
+  justify-self: end;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
 }
 
 .popup__github-link:hover,
@@ -84,14 +116,9 @@ body {
   color: #000000;
 }
 
-.popup__options-link {
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  text-decoration: none;
-  cursor: pointer;
+.popup__update-chip:hover,
+.popup__update-chip:focus-visible {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
 }
 
 .popup__options-link:hover,
