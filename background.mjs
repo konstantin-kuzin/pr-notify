@@ -235,40 +235,56 @@ async function saveState(state) {
   });
 }
 
+const ICON_PATHS = {
+  default: {
+    16: "icons/icon-16.png",
+    32: "icons/icon-32.png",
+  },
+  orange: {
+    16: "icons/icon-16-orange.png",
+    32: "icons/icon-32-orange.png",
+  },
+  red: {
+    16: "icons/icon-16-red.png",
+    32: "icons/icon-32-red.png",
+  },
+  error: {
+    16: "icons/icon-16-error.png",
+    32: "icons/icon-32-error.png",
+  },
+};
+
+function getIconPathsFromItems(items, checkedAt) {
+  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
+
+  if (urgency === "red") {
+    return ICON_PATHS.red;
+  }
+
+  if (urgency === "orange") {
+    return ICON_PATHS.orange;
+  }
+
+  return ICON_PATHS.default;
+}
+
 async function updateBadge(count, { isError = false, items = [], checkedAt = null } = {}) {
   const text = isError || count <= 0 ? "" : String(count);
 
   if (isError) {
-    await chrome.action.setBadgeBackgroundColor({ color: "#a00000" });
+    await chrome.action.setIcon({ path: ICON_PATHS.error });
     await chrome.action.setBadgeText({ text: "" });
-
-    if (chrome.action.setBadgeTextColor) {
-      await chrome.action.setBadgeTextColor({ color: "#ffffff" });
-    }
-
-    await chrome.action.setIcon({
-      path: {
-        16: "icons/icon-16-error.png",
-        32: "icons/icon-32-error.png",
-      },
-    });
     return;
   }
 
-  await chrome.action.setIcon({
-    path: {
-      16: "icons/icon-16.png",
-      32: "icons/icon-32.png",
-    },
-  });
+  await chrome.action.setIcon({ path: getIconPathsFromItems(items, checkedAt) });
 
   if (count <= 0) {
     await chrome.action.setBadgeText({ text: "" });
     return;
   }
 
-  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
-  const style = BADGE_STYLES[urgency] ?? BADGE_STYLES.gray;
+  const style = BADGE_STYLES.gray;
 
   await chrome.action.setBadgeBackgroundColor({ color: style.background });
   await chrome.action.setBadgeText({ text });

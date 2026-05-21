@@ -274,13 +274,13 @@ body {
 }
 
 .popup__author-time--orange {
-  color: #c43e00;
-  background: #fff3e0;
+  color: #b84008;
+  background: #ffe2b1;
 }
 
 .popup__author-time--red {
-  color: #e30613;
-  background: #f9e7ec;
+  color: #ef1515;
+  background: #e7bbbb;
 }
 
 .popup__author-row {

@@ -1,6 +1,5 @@
 import {
   BADGE_STYLES,
-  getBadgeUrgencyFromItems,
   getItemWorkingTimeUrgency,
   getWorkingElapsedMinutes,
 } from "./working-time.mjs";
@@ -102,9 +101,7 @@ function render() {
   } else {
     countBadge.classList.remove("hidden");
     countBadge.textContent = String(currentState.count ?? 0);
-    applyCountBadgeStyle(
-      getBadgeUrgencyFromItems(currentState.items, currentState.lastCheckedAt),
-    );
+    applyCountBadgeStyle("gray");
   }
 
   lastUpdated.textContent = `Последняя проверка: ${formatTimestamp(currentState.lastCheckedAt)}`;

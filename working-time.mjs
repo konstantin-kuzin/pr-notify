@@ -1,6 +1,6 @@
-/** Москва, пн–пт, 9:00–18:00 (конец интервала не включается). */
+/** Москва, пн–пт, 10:00–18:00 (конец интервала не включается). */
 const MOSCOW_TZ = "Europe/Moscow";
-const WORK_START_HOUR = 9;
+const WORK_START_HOUR = 10;
 const WORK_END_HOUR = 18;
 const MOSCOW_OFFSET = "+03:00";
 
