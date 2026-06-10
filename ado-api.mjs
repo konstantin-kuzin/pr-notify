@@ -292,7 +292,8 @@ function pickPushMeta(ref) {
   return { date, pushId };
 }
 
-function pickAuthorCommitterTimestamp(ref) {
+/** Дата коммита: committer ближе к моменту push (amend/rebase сохраняют старый author). */
+function pickCommitterAuthorTimestamp(ref) {
   if (!ref || typeof ref !== "object") {
     return "";
   }
@@ -301,7 +302,7 @@ function pickAuthorCommitterTimestamp(ref) {
   const committer = ref.committer ?? ref.Committer;
 
   return normalizeIsoDate(
-    author?.date ?? author?.Date ?? committer?.date ?? committer?.Date ?? "",
+    committer?.date ?? committer?.Date ?? author?.date ?? author?.Date ?? "",
   ) ?? "";
 }
 
@@ -364,7 +365,7 @@ async function fetchCommitTimestamp(config, project, repo, commitId) {
   const path = `${projectSeg}/_apis/git/repositories/${repoSeg}/commits/${commitSeg}?api-version=${apiVersion}`;
   const commit = await adoFetch(config, path);
   const pushTimestamp = await resolvePushTimestampOnly(config, project, repo, commit);
-  const timestamp = pushTimestamp || pickAuthorCommitterTimestamp(commit);
+  const timestamp = pushTimestamp || pickCommitterAuthorTimestamp(commit);
 
   commitTimestampCache.set(cacheKey, timestamp);
   return timestamp;
@@ -391,12 +392,57 @@ async function fetchGitPullRequestById(config, project, repo, pullRequestId) {
 }
 
 /**
- * Время пуша source: сначала push (inline / GET push), затем GET commit, в конце — дата коммита.
+ * `createdDate` последней итерации PR — момент последнего push в ветку PR.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {string} project
+ * @param {string} repo
+ * @param {number | string} pullRequestId
+ */
+async function fetchLatestPullRequestIterationDate(config, project, repo, pullRequestId) {
+  const projectSeg = encodeURIComponent(String(project).trim());
+  const repoSeg = encodeURIComponent(String(repo).trim());
+  const prIdSeg = encodeURIComponent(String(pullRequestId).trim());
+  const query = new URLSearchParams({
+    "api-version": resolveApiVersion(config),
+  });
+  const path = `${projectSeg}/_apis/git/repositories/${repoSeg}/pullRequests/${prIdSeg}/iterations?${query.toString()}`;
+  const data = await adoFetch(config, path);
+  const iterations = Array.isArray(data?.value) ? data.value : [];
+  let latest = "";
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (const iteration of iterations) {
+    const createdAt = normalizeIsoDate(
+      iteration?.createdDate ?? iteration?.CreatedDate ?? "",
+    );
+
+    if (!createdAt) {
+      continue;
+    }
+
+    const timestamp = Date.parse(createdAt);
+
+    if (!Number.isFinite(timestamp) || timestamp <= latestTimestamp) {
+      continue;
+    }
+
+    latest = createdAt;
+    latestTimestamp = timestamp;
+  }
+
+  return latest;
+}
+
+/**
+ * Время пуша source: push (inline / GET push), GET commit, в конце — committer/author.
  */
 async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, repo) {
   const sourceId = String(
-    listPr?.lastMergeSourceCommit?.commitId
-      ?? detail?.lastMergeSourceCommit?.commitId
+    detail?.lastMergeSourceCommit?.commitId
+      ?? detail?.lastMergeSourceCommit?.CommitId
+      ?? listPr?.lastMergeSourceCommit?.commitId
+      ?? listPr?.lastMergeSourceCommit?.CommitId
       ?? "",
   ).trim();
 
@@ -408,7 +454,7 @@ async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, 
   const hit = commits.find(
     (c) => String(c?.commitId ?? c?.CommitId ?? "").toLowerCase() === sourceId.toLowerCase(),
   );
-  const commitRefs = [detail?.lastMergeSourceCommit, hit].filter(
+  const commitRefs = [hit, detail?.lastMergeSourceCommit].filter(
     (ref) => ref && typeof ref === "object",
   );
 
@@ -431,10 +477,10 @@ async function resolveLastCommitAtFromPrDetail(config, detail, listPr, project, 
   }
 
   for (const ref of commitRefs) {
-    const authorTimestamp = pickAuthorCommitterTimestamp(ref);
+    const commitTimestamp = pickCommitterAuthorTimestamp(ref);
 
-    if (authorTimestamp) {
-      return authorTimestamp;
+    if (commitTimestamp) {
+      return commitTimestamp;
     }
   }
 
@@ -597,25 +643,19 @@ function isUserPullRequestComment(comment) {
 }
 
 /**
- * Последний комментарий участника группы, опубликованный строго после `afterIso`.
+ * Последний комментарий участника reviewer-группы, который **открывает тред**
+ * (`comments[0]`). Ответы внутри ветки не учитываются.
  *
  * @param {Array<any>} threads
  * @param {Set<string>} memberIds
- * @param {string|null|undefined} afterIso
  */
-function resolveLatestGroupMemberCommentAfter(threads, memberIds, afterIso) {
-  if (!afterIso || memberIds.size === 0 || !Array.isArray(threads)) {
-    return "";
-  }
-
-  const afterTimestamp = Date.parse(afterIso);
-
-  if (!Number.isFinite(afterTimestamp)) {
+function resolveLatestGroupMemberComment(threads, memberIds) {
+  if (memberIds.size === 0 || !Array.isArray(threads)) {
     return "";
   }
 
   let latest = "";
-  let latestTimestamp = afterTimestamp;
+  let latestTimestamp = Number.NEGATIVE_INFINITY;
 
   for (const thread of threads) {
     if (thread?.isDeleted === true) {
@@ -623,42 +663,37 @@ function resolveLatestGroupMemberCommentAfter(threads, memberIds, afterIso) {
     }
 
     const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+    const comment = comments[0];
 
-    for (const comment of comments) {
-      if (!isUserPullRequestComment(comment)) {
-        continue;
-      }
+    if (!isUserPullRequestComment(comment)) {
+      continue;
+    }
 
-      const authorId = normalizePlainText(
-        comment.author?.id ?? comment.Author?.Id ?? "",
-      );
+    const authorId = normalizePlainText(
+      comment.author?.id ?? comment.Author?.Id ?? "",
+    );
 
-      if (!memberIds.has(authorId)) {
-        continue;
-      }
+    if (!memberIds.has(authorId)) {
+      continue;
+    }
 
-      const publishedAt = normalizeIsoDate(
-        comment.publishedDate
-          ?? comment.PublishedDate
-          ?? comment.lastUpdatedDate
-          ?? comment.LastUpdatedDate
-          ?? "",
-      );
+    const publishedAt = normalizeIsoDate(
+      comment.publishedDate ?? comment.PublishedDate ?? "",
+    );
 
-      if (!publishedAt) {
-        continue;
-      }
+    if (!publishedAt) {
+      continue;
+    }
 
-      const publishedTimestamp = Date.parse(publishedAt);
+    const publishedTimestamp = Date.parse(publishedAt);
 
-      if (!Number.isFinite(publishedTimestamp) || publishedTimestamp <= afterTimestamp) {
-        continue;
-      }
+    if (!Number.isFinite(publishedTimestamp)) {
+      continue;
+    }
 
-      if (publishedTimestamp > latestTimestamp) {
-        latest = publishedAt;
-        latestTimestamp = publishedTimestamp;
-      }
+    if (publishedTimestamp > latestTimestamp) {
+      latest = publishedAt;
+      latestTimestamp = publishedTimestamp;
     }
   }
 
@@ -667,7 +702,7 @@ function resolveLatestGroupMemberCommentAfter(threads, memberIds, afterIso) {
 
 /**
  * Обогащает PR полным description, временем пуша source и (опционально) последним
- * комментарием участника reviewer-группы после последнего пуша.
+ * комментарием участника reviewer-группы.
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
@@ -700,13 +735,20 @@ export async function attachPullRequestLastCommitTimes(config, pullRequests, gro
           return pullRequest;
         }
 
-        const lastCommitAt = await resolveLastCommitAtFromPrDetail(
-          config,
-          detail,
-          pullRequest,
-          project,
-          repo,
-        );
+        const [lastCommitAtFromDetail, lastIterationAt] = await Promise.all([
+          resolveLastCommitAtFromPrDetail(
+            config,
+            detail,
+            pullRequest,
+            project,
+            repo,
+          ),
+          fetchLatestPullRequestIterationDate(config, project, repo, prId).catch((error) => {
+            logAdoError(`fetchLatestPullRequestIterationDate ${prId}`, error);
+            return "";
+          }),
+        ]);
+        const lastCommitAt = pickLatestIsoDate(lastCommitAtFromDetail, lastIterationAt);
 
         const next = { ...pullRequest };
 
@@ -718,16 +760,10 @@ export async function attachPullRequestLastCommitTimes(config, pullRequests, gro
           next.lastCommitAt = lastCommitAt;
         }
 
-        const pushBaseline = lastCommitAt || normalizeIsoDate(pullRequest?.creationDate);
-
-        if (memberIds.size > 0 && pushBaseline) {
+        if (memberIds.size > 0) {
           try {
             const threads = await fetchGitPullRequestThreads(config, project, repo, prId);
-            const lastGroupCommentAt = resolveLatestGroupMemberCommentAfter(
-              threads,
-              memberIds,
-              pushBaseline,
-            );
+            const lastGroupCommentAt = resolveLatestGroupMemberComment(threads, memberIds);
 
             if (lastGroupCommentAt) {
               next.lastGroupCommentAt = lastGroupCommentAt;
@@ -890,6 +926,10 @@ function getIdentityLookupQueryField(value) {
 
   if (/^vss/i.test(normalized)) {
     return "subjectDescriptors";
+  }
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)) {
+    return "identityIds";
   }
 
   return "descriptors";

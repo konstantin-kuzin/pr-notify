@@ -131,7 +131,7 @@ export function getWorkingTimeUrgency(minutes) {
 
 /**
  * Есть ли коммиты/пуши позже последнего комментария участника группы.
- * Без комментария считаем, что «ожидание ревью» — счётчик включается.
+ * Без открывающего тред комментария группы считаем, что «ожидание ревью» — счётчик включается.
  *
  * @param {{ lastCommitAt?: string, lastGroupCommentAt?: string }} item
  * @returns {boolean}
