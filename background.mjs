@@ -364,7 +364,8 @@ async function updateBadge(count, { isError = false, items = [], checkedAt = nul
     return;
   }
 
-  const style = BADGE_STYLES.gray;
+  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
+  const style = BADGE_STYLES[urgency] ?? BADGE_STYLES.gray;
 
   await chrome.action.setBadgeBackgroundColor({ color: style.background });
   await chrome.action.setBadgeText({ text });
