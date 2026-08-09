@@ -244,6 +244,15 @@ body {
   color: var(--muted);
 }
 
+#empty-state-text {
+  display: block;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
+  color: gray;
+  padding: 10px 0;
+}
+
 .popup__empty-setup-hint {
   margin: 0 0 10px;
   font-size: 0.9rem;
@@ -355,6 +364,36 @@ body {
   display: flex;
   align-items: flex-start;
   gap: 4px;
+}
+
+/* Иконка Storybook слева от описания */
+.popup__storybook {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: 2px;
+  opacity: 0.85;
+  filter: saturate(0.05);
+}
+
+.popup__storybook:hover,
+.popup__storybook:focus-visible {
+  opacity: 1;
+  filter: saturate(1);
+}
+
+.popup__storybook-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 /* Иконка описания в строке автора (span, не button) */
@@ -654,10 +693,28 @@ body {
   color: var(--danger);
 }
 
+.popup__policies {
+  margin: 0;
+}
+
+.popup__policies-heading {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .popup__blockers {
   margin: 4px 0 0;
   padding: 0;
   list-style: none;
+}
+
+.popup__blockers--optional {
+  margin-top: 2px;
 }
 
 .popup__blocker {

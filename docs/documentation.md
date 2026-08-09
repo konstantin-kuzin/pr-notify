@@ -11,7 +11,7 @@
 
 В списках дополнительно:
 
-- **Policies** — проблемы required-политик, из‑за которых недоступен Complete (на Review — раскрываемый бейдж; на My PRs у активных — список под карточкой);
+- **Policies** — проблемы required/optional-политик, из‑за которых недоступен Complete или видны красные Optional (на Review — раскрываемый бейдж; на My PRs у активных — список под карточкой);
 - **конфликты слияния** — бейдж «конфликт» и текст из Conflicts API (Review и активные My PRs).
 
 Данные получаются через **REST API** (`_apis/...`).
@@ -99,7 +99,7 @@
 
 1. Запрос активных PR с **`searchCriteria.creatorId`**.
 2. Отбрасываются черновики и неактивные статусы (как в Review).
-3. Для каждого активного PR подмешиваются **Policies** (`blockingReasons`) и при необходимости **конфликты** (`conflictText`) — см. разделы ниже.
+3. Для каждого активного PR подмешиваются **Policies** (`blockingReasons` / `optionalPolicyReasons`) и при необходимости **конфликты** (`conflictText`) — см. разделы ниже.
 4. В элемент UI дополнительно: `targetBranch` (целевая ветка без `refs/heads/`), `status`.
 5. Сортировка: **новые выше** по `createdAt` (`sortMyPullRequestsNewestFirst`).
 6. Результат пишется в `prState.myItems` / `myCount` (счётчик вкладки и `#count-badge` на My PRs — только активные).
@@ -116,17 +116,19 @@
 
 Пустое состояние My PRs («Нет ваших активных pull requests») — только если нет ни активных, ни загруженных Complete (и загрузка Complete уже завершилась).
 
-## Policies (required) — проблемы Complete
+## Policies (Required + Optional)
 
-Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **активных** PR **обеих** вкладок (Review и My PRs PRs PRs).
+Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **активных** PR **обеих** вкладок (Review и My PRs).
 
 ### API
 
 1. **`GET {project}/_apis/policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/{projectGuid}/{pullRequestId}`**  
    (`api-version` для endpoint — preview, например `6.0-preview.1`).
 2. Параллельно (best-effort): **`GET .../pullRequests/{id}/statuses`** — для текстов status-политик.
-3. В `blockingReasons` попадают только **required** политики (`isBlocking === true`, включённые), у которых статус **не** `approved` / `notApplicable` — как красные пункты в блоке Policies в ADO.
-4. При ошибке запроса: `blockingReasons = null` (в UI — сообщение об ошибке загрузки).
+3. В списки попадают включённые политики (кроме merge strategy), у которых статус **не** `approved` / `notApplicable` — как красные пункты в overview Policies в ADO:
+   - **`blockingReasons`** — Required (`isBlocking === true`);
+   - **`optionalPolicyReasons`** — Optional (`isBlocking !== true`).
+4. При ошибке запроса: оба поля = `null` (в UI — сообщение об ошибке загрузки).
 
 ### Тексты причин
 
@@ -139,18 +141,18 @@
 | Required reviewers | `Required reviewers have not approved` |
 | Comment requirements | `Not all comments resolved` |
 | Build с `context.isExpired` | `{displayName} expired` |
-| Status policy | `description` из PR statuses / `defaultDisplayName` (например `Votes check`) |
+| Status policy | `description` из PR statuses / `defaultDisplayName` (например `Votes check`); при `isExpired` — суффикс `expired` |
 | Merge strategy | **не** включается (в overview ADO тоже не показывается) |
 
 ### UI
 
 | Вкладка | Показ |
 |---------|--------|
-| **Review** | Если есть проблемные политики — розовый бейдж с **красным числом** замечаний; клик раскрывает/сворачивает список (красный «×» + текст). |
-| **My PRs** (активные) | Под карточкой всегда: список причин, либо **«Готов к Complete»** (пустой массив), либо **«Не удалось загрузить политики Complete»** (`null`). |
+| **Review** | Если есть проблемные Required и/или Optional — розовый бейдж с **числом** замечаний; клик раскрывает список (Required сверху, блок **Optional** ниже). |
+| **My PRs** (активные) | Под карточкой: список Required **или** **«Готов к Complete»** (если Required пуст), затем блок **Optional** при наличии; либо **«Не удалось загрузить политики Complete»** (`null`). |
 | **My PRs** (Complete) | Policies не загружаются и не показываются. |
 
-Поле в элементе списка: **`blockingReasons`**: `string[]` | `null` | отсутствует.
+Поля в элементе списка: **`blockingReasons`**, **`optionalPolicyReasons`**: `string[]` | `null` | отсутствует.
 
 ## Конфликты слияния
 
@@ -181,7 +183,7 @@
    - **`GET .../pullrequests/{id}?includeCommits=true`**: полное `description`; **`lastCommitAt`** из push/commit (кэш);
    - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system).
 
-2. **Review и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` (см. раздел «Policies»).
+2. **Review и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
 
 3. **Review и My PRs (активные)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
 
@@ -195,16 +197,17 @@
 - **`status`** — `active` / `abandoned` / `completed` / `unknown`;
 - **`lastCommitAt`**, **`lastGroupCommentAt`** — ISO-даты (в основном на Review; для рабочего времени);
 - **`targetBranch`** — целевая ветка (на My PRs);
-- **`blockingReasons`** — проблемы required Policies (см. выше);
+- **`blockingReasons`** — проблемы Required Policies;
+- **`optionalPolicyReasons`** — проблемы Optional Policies;
 - **`conflictText`** — при конфликтах слияния (иначе поле отсутствует).
 
 ## Состояние в `storage` (ключ `prState`)
 
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
-- `items` — массив элементов вкладки **Review**: `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons`, при конфликтах слияния — `conflictText`;
+- `items` — массив элементов вкладки **Review**: `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
 - `count` — длина `items` (именно он влияет на badge toolbar и уведомления о новых PR);
-- `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
+- `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
 - `myCount` — длина `myItems` (только активные; Complete в storage не кэшируются);
 - `matchedSectionTitle` — служебное поле фильтра (заголовок секции совпадения, если используется);
 - `lastCheckedAt` — ISO-время последней попытки обновления;
@@ -304,6 +307,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - клик по заголовку открывает PR в новой вкладке и закрывает popup;
 - под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если новых пушей после последнего комментария группы нет — текст **«Нет обновлений»** (без цветного чипа);
 - фрагмент времени — **чип** при **> 6 / > 8 / > 16** рабочих ч (жёлтый / оранжевый / красный); пороги — [`working-time.mjs`](../working-time.mjs);
+- иконка **Storybook** (слева от иконки описания) открывает `https://storybook.s1.ksc-web.avp.ru/hexa-ui/<id PR>/` в новой вкладке и закрывает popup; **скрывается**, если есть конфликты слияния или в Policies есть `[OSMP] Storybook Hexa UI deploy for Review expired`;
 - при наличии описания — иконка раскрывает **панель под карточкой** с **упрощённым markdown** (заголовки **h1–h6**, списки, ссылки, код, жирный/курсив, картинки по `http(s)`; разбор скобок в URL картинок с балансом `()`);
 - **Policies** — розовый бейдж с числом замечаний (см. раздел «Policies»);
 - **конфликты** — бейдж **«конфликт»** (см. раздел «Конфликты слияния»);
@@ -315,11 +319,12 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - под заголовком: целевая ветка (`→ master`) и дата создания;
 - **Policies** — список под карточкой (см. раздел «Policies»);
 - **конфликты** — бейдж в строке метаданных (см. раздел «Конфликты слияния»);
-- описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются.
+- иконка Storybook и описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются.
 
 Карточка PR (**My PRs**, Complete):
 
 - ниже всех активных; бейдж **Complete**; дата закрытия; без Policies и конфликтов;
+- иконка Storybook — как у активных;
 - догрузка по 10, кнопка **«Показать ещё»** (см. «My PRs → Завершённые PR»).
 
 Сообщения popup → background:

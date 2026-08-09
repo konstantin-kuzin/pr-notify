@@ -17,6 +17,8 @@ const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
 const MY_COMPLETED_PAGE_SIZE = 20;
 const TAB_REVIEW = "review";
 const TAB_MY = "my";
+const STORYBOOK_BASE_URL = "https://storybook.s1.ksc-web.avp.ru/hexa-ui";
+const STORYBOOK_EXPIRED_REASON_RE = /\[OSMP\]\s*Storybook Hexa UI deploy for Review expired/i;
 const DEFAULT_STATE = {
   items: [],
   count: 0,
@@ -496,6 +498,10 @@ function createItemElement(item, options = {}) {
 
   authorRow.append(author);
 
+  if (item?.id && shouldShowStorybookLink(item)) {
+    authorRow.append(createStorybookButton(item));
+  }
+
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
   let descriptionUi = null;
 
@@ -605,6 +611,21 @@ function fillMyMetaParagraph(el, item) {
 
 /**
  * @param {any} item
+ * @returns {{ required: string[], optional: string[] }}
+ */
+function getPolicyReasonLists(item) {
+  const required = Array.isArray(item?.blockingReasons)
+    ? item.blockingReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
+    : [];
+  const optional = Array.isArray(item?.optionalPolicyReasons)
+    ? item.optionalPolicyReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
+    : [];
+
+  return { required, optional };
+}
+
+/**
+ * @param {any} item
  */
 function createBlockingReasonsBlock(item) {
   if (item.blockingReasons === null) {
@@ -614,27 +635,44 @@ function createBlockingReasonsBlock(item) {
     return failed;
   }
 
-  const reasons = Array.isArray(item.blockingReasons)
-    ? item.blockingReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
-    : [];
+  const { required, optional } = getPolicyReasonLists(item);
+  const wrap = document.createElement("div");
+  wrap.className = "popup__policies";
 
-  if (reasons.length === 0) {
+  if (required.length === 0) {
     const ready = document.createElement("p");
     ready.className = "popup__ready";
     ready.textContent = "Готов к Complete";
-    return ready;
+    wrap.append(ready);
+  } else {
+    wrap.append(createBlockingReasonsList(required));
   }
 
-  return createBlockingReasonsList(reasons);
+  if (optional.length > 0) {
+    const heading = document.createElement("p");
+    heading.className = "popup__policies-heading";
+    heading.textContent = "Optional";
+    wrap.append(heading, createBlockingReasonsList(optional, { optional: true }));
+  }
+
+  return wrap;
 }
 
 /**
  * @param {string[]} reasons
+ * @param {{ optional?: boolean }} [options]
  */
-function createBlockingReasonsList(reasons) {
+function createBlockingReasonsList(reasons, options = {}) {
   const list = document.createElement("ul");
-  list.className = "popup__blockers";
-  list.setAttribute("aria-label", "Причины, блокирующие Complete");
+  list.className = options.optional
+    ? "popup__blockers popup__blockers--optional"
+    : "popup__blockers";
+  list.setAttribute(
+    "aria-label",
+    options.optional
+      ? "Optional policies"
+      : "Причины, блокирующие Complete",
+  );
 
   for (const reason of reasons) {
     const row = document.createElement("li");
@@ -654,6 +692,28 @@ function createBlockingReasonsList(reasons) {
   }
 
   return list;
+}
+
+/**
+ * @param {string[]} required
+ * @param {string[]} optional
+ */
+function createPolicyReasonsBlock(required, optional) {
+  const wrap = document.createElement("div");
+  wrap.className = "popup__policies";
+
+  if (required.length > 0) {
+    wrap.append(createBlockingReasonsList(required));
+  }
+
+  if (optional.length > 0) {
+    const heading = document.createElement("p");
+    heading.className = "popup__policies-heading";
+    heading.textContent = "Optional";
+    wrap.append(heading, createBlockingReasonsList(optional, { optional: true }));
+  }
+
+  return wrap;
 }
 
 /** Набор причин, при котором бейдж показывает «Votes check» вместо числа. */
@@ -681,11 +741,14 @@ function isVotesCheckOnlyReasons(reasons) {
  * @returns {{ icon: HTMLSpanElement, section: HTMLDivElement } | null}
  */
 function createBlockingReasonsToggle(item) {
-  const reasons = Array.isArray(item.blockingReasons)
-    ? item.blockingReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
-    : [];
+  if (item.blockingReasons === null) {
+    return null;
+  }
 
-  if (reasons.length === 0) {
+  const { required, optional } = getPolicyReasonLists(item);
+  const totalCount = required.length + optional.length;
+
+  if (totalCount === 0) {
     return null;
   }
 
@@ -697,11 +760,11 @@ function createBlockingReasonsToggle(item) {
   panel.hidden = true;
   panel.setAttribute("role", "region");
   panel.id = `pr-blockers-${String(item.id).replace(/[^\w-]/g, "_")}`;
-  panel.append(createBlockingReasonsList(reasons));
+  panel.append(createPolicyReasonsBlock(required, optional));
   section.append(panel);
 
-  const votesCheckOnly = isVotesCheckOnlyReasons(reasons);
-  const badgeLabel = votesCheckOnly ? "Votes check" : String(reasons.length);
+  const votesCheckOnly = optional.length === 0 && isVotesCheckOnlyReasons(required);
+  const badgeLabel = votesCheckOnly ? "Votes check" : String(totalCount);
 
   const badge = document.createElement("span");
   badge.className = "popup__blockers-badge";
@@ -724,12 +787,13 @@ function createBlockingReasonsToggle(item) {
 
   badge.addEventListener("click", (event) => {
     event.preventDefault();
+    event.stopPropagation();
     toggle();
   });
-
   badge.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
+      event.stopPropagation();
       toggle();
     }
   });
@@ -799,6 +863,61 @@ function createConflictToggle(item) {
 const DESC_ICON_SVG = `<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" aria-hidden="true">
   <path d="M1.5 3L1.5 13L6.293 13L8 14.707L9.707 13L14.5 13L14.5 3L1.5 3ZM2.5 4L13.5 4L13.5 12L9.293 12L8 13.293L6.707 12L2.5 12L2.5 4ZM4.5 5.5L4.5 6.5L11.5 6.5L11.5 5.5L4.5 5.5ZM4.5 7.5L4.5 8.5L11.5 8.5L11.5 7.5L4.5 7.5ZM4.5 9.5L4.5 10.5L9.5 10.5L9.5 9.5L4.5 9.5Z" fill="currentColor" fill-rule="nonzero" />
 </svg>`;
+
+/**
+ * Скрываем Storybook при конфликтах слияния или истёкшем OSMP Storybook deploy.
+ *
+ * @param {any} item
+ * @returns {boolean}
+ */
+function shouldShowStorybookLink(item) {
+  const conflictText = typeof item?.conflictText === "string" ? item.conflictText.trim() : "";
+
+  if (conflictText) {
+    return false;
+  }
+
+  const policyReasons = [
+    ...(Array.isArray(item?.blockingReasons) ? item.blockingReasons : []),
+    ...(Array.isArray(item?.optionalPolicyReasons) ? item.optionalPolicyReasons : []),
+  ];
+
+  return !policyReasons.some((reason) => STORYBOOK_EXPIRED_REASON_RE.test(String(reason ?? "")));
+}
+
+/**
+ * Ссылка на Storybook превью для PR: /hexa-ui/<id>/.
+ *
+ * @param {{ id: string | number }} item
+ * @returns {HTMLButtonElement}
+ */
+function createStorybookButton(item) {
+  const button = document.createElement("button");
+  const label = `Открыть Storybook для PR #${item.id}`;
+
+  button.className = "popup__storybook";
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+
+  const icon = document.createElement("img");
+  icon.className = "popup__storybook-icon";
+  icon.src = "icons/storybook.svg";
+  icon.width = 18;
+  icon.height = 18;
+  icon.alt = "";
+  icon.setAttribute("aria-hidden", "true");
+  button.append(icon);
+
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await chrome.tabs.create({ url: `${STORYBOOK_BASE_URL}/${item.id}/` });
+    window.close();
+  });
+
+  return button;
+}
 
 /**
  * Иконка в строке автора (не &lt;button&gt;), панель ниже.

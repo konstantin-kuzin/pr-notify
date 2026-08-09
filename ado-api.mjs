@@ -515,7 +515,13 @@ function indexPullRequestStatusesById(statuses) {
   return byId;
 }
 
-function isBlockingPolicyEvaluation(evaluation) {
+/**
+ * Политика видна в overview Policies ADO (Required или Optional):
+ * включена, не удалена, не merge strategy, статус не approved/notApplicable.
+ *
+ * @param {any} evaluation
+ */
+function isOverviewPolicyEvaluation(evaluation) {
   const configuration = evaluation?.configuration;
 
   if (!configuration || typeof configuration !== "object") {
@@ -523,10 +529,6 @@ function isBlockingPolicyEvaluation(evaluation) {
   }
 
   if (configuration.isEnabled === false || configuration.isDeleted === true) {
-    return false;
-  }
-
-  if (configuration.isBlocking !== true) {
     return false;
   }
 
@@ -540,6 +542,15 @@ function isBlockingPolicyEvaluation(evaluation) {
   const status = String(evaluation?.status ?? "").toLowerCase();
 
   return status !== "approved" && status !== "notapplicable";
+}
+
+/**
+ * Required-политика (`isBlocking`), блокирующая Complete.
+ *
+ * @param {any} evaluation
+ */
+function isRequiredPolicyEvaluation(evaluation) {
+  return evaluation?.configuration?.isBlocking === true;
 }
 
 function countBlockingIndividualReviewers(pullRequest) {
@@ -567,7 +578,7 @@ function countApprovedReviewers(pullRequest) {
 }
 
 /**
- * Человекочитаемая причина в духе блока Policies → Required в ADO.
+ * Человекочитаемая причина в духе блока Policies в ADO (Required / Optional).
  *
  * @param {any} evaluation
  * @param {any} [pullRequest]
@@ -677,6 +688,10 @@ function formatPolicyBlockingReason(evaluation, pullRequest = null, statusById =
       || typeName
       || "Status";
 
+    if (context.isExpired === true && !/\bexpired\b/i.test(name)) {
+      return `${name} expired`;
+    }
+
     return name;
   }
 
@@ -695,8 +710,9 @@ function formatPolicyBlockingReason(evaluation, pullRequest = null, statusById =
 }
 
 /**
- * Для каждого PR подмешивает `blockingReasons` — required-политики, из‑за которых
- * Complete недоступен (как блок Policies → Required в ADO).
+ * Для каждого PR подмешивает проблемы Policies из overview ADO:
+ * - `blockingReasons` — Required (`isBlocking`), из‑за которых недоступен Complete;
+ * - `optionalPolicyReasons` — Optional (не blocking), красные пункты в Optional.
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
@@ -720,10 +736,11 @@ export async function attachPullRequestBlockingReasons(config, pullRequests) {
         ]);
         const statusById = indexPullRequestStatusesById(statuses);
         const blockingReasons = [];
+        const optionalPolicyReasons = [];
         const seen = new Set();
 
         for (const evaluation of evaluations) {
-          if (!isBlockingPolicyEvaluation(evaluation)) {
+          if (!isOverviewPolicyEvaluation(evaluation)) {
             continue;
           }
 
@@ -734,18 +751,25 @@ export async function attachPullRequestBlockingReasons(config, pullRequests) {
           }
 
           seen.add(reason);
-          blockingReasons.push(reason);
+
+          if (isRequiredPolicyEvaluation(evaluation)) {
+            blockingReasons.push(reason);
+          } else {
+            optionalPolicyReasons.push(reason);
+          }
         }
 
         return {
           ...pullRequest,
           blockingReasons,
+          optionalPolicyReasons,
         };
       } catch (error) {
         logAdoError(`fetchPullRequestPolicyEvaluations ${prId}`, error);
         return {
           ...pullRequest,
           blockingReasons: null,
+          optionalPolicyReasons: null,
         };
       }
     }),
@@ -2189,11 +2213,21 @@ export function mapPullRequestToItem(pr, config) {
   );
   /** @type {string[] | null | undefined} */
   let blockingReasons;
+  /** @type {string[] | null | undefined} */
+  let optionalPolicyReasons;
 
   if (pr?.blockingReasons === null) {
     blockingReasons = null;
   } else if (Array.isArray(pr?.blockingReasons)) {
     blockingReasons = pr.blockingReasons
+      .map((reason) => normalizePlainText(reason))
+      .filter(Boolean);
+  }
+
+  if (pr?.optionalPolicyReasons === null) {
+    optionalPolicyReasons = null;
+  } else if (Array.isArray(pr?.optionalPolicyReasons)) {
+    optionalPolicyReasons = pr.optionalPolicyReasons
       .map((reason) => normalizePlainText(reason))
       .filter(Boolean);
   }
@@ -2220,6 +2254,7 @@ export function mapPullRequestToItem(pr, config) {
     ...(closedAt ? { closedAt } : {}),
     ...(targetBranch ? { targetBranch } : {}),
     ...(blockingReasons !== undefined ? { blockingReasons } : {}),
+    ...(optionalPolicyReasons !== undefined ? { optionalPolicyReasons } : {}),
     ...(conflictText ? { conflictText } : {}),
   };
 }
