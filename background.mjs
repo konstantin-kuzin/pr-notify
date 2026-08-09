@@ -4,15 +4,22 @@ import {
   validateAdoConfig,
 } from "./ado-config.mjs";
 import {
+  attachPullRequestBlockingReasons,
+  attachPullRequestConflictInfo,
   attachPullRequestLastCommitTimes,
   fetchConnectionIdentity,
+  filterMyPullRequests,
   filterPullRequestsForExtension,
   getExtensionReviewerContext,
+  listActivePullRequestsByCreator,
   listActivePullRequestsForAllowedReviewers,
+  listCompletedPullRequestsByCreator,
   logAdoError,
   mapPullRequestToItem,
+  MY_TAB_CREATOR_OVERRIDE_ID,
   resolveConfiguredGroupMemberIds,
   setReviewerVoteApprove,
+  sortMyPullRequestsNewestFirst,
   sortPullRequestsOldestFirst,
 } from "./ado-api.mjs";
 import { BADGE_STYLES, getBadgeUrgencyFromItems } from "./working-time.mjs";
@@ -21,6 +28,8 @@ const ALARM_NAME = "refresh-pull-requests";
 const CHECK_INTERVAL_MINUTES = 10;
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
+const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
+const MY_COMPLETED_PAGE_SIZE = 10;
 const STORAGE_KEY = "prState";
 const UPDATE_STATE_KEY = "prUpdateState";
 const GITHUB_MANIFEST_URL = "https://raw.githubusercontent.com/konstantin-kuzin/pr-notify/main/manifest.json";
@@ -30,6 +39,8 @@ const APPROVE_REFRESH_INTERVAL_MS = 2_000;
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  myItems: [],
+  myCount: 0,
   lastCheckedAt: null,
   lastSuccessAt: null,
   lastTrigger: null,
@@ -83,6 +94,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void approvePullRequest(message?.pullRequestId)
       .then((result) => {
         sendResponse({ ok: true, result });
+      })
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+    return true;
+  }
+
+  if (message?.type === LOAD_MY_COMPLETED_MESSAGE_TYPE) {
+    void loadMyCompletedPullRequests({
+      skip: message?.skip,
+      top: message?.top,
+    })
+      .then((result) => {
+        sendResponse({ ok: true, ...result });
       })
       .catch((error) => {
         sendResponse({
@@ -160,25 +189,41 @@ async function refreshPullRequests(trigger) {
 
   try {
     const identity = await fetchConnectionIdentity(config);
+    // TEMP: вкладка My показывает PR тестового пользователя, не текущего.
+    const myCreatorId = MY_TAB_CREATOR_OVERRIDE_ID || identity.id;
     const { allowedReviewerIds } = getExtensionReviewerContext(config, identity.id);
-    const rawPullRequests = await listActivePullRequestsForAllowedReviewers(
-      config,
-      allowedReviewerIds,
-    );
+    const [rawPullRequests, rawMyPullRequests] = await Promise.all([
+      listActivePullRequestsForAllowedReviewers(config, allowedReviewerIds),
+      listActivePullRequestsByCreator(config, myCreatorId),
+    ]);
     const { filtered } = await filterPullRequestsForExtension(
       config,
       rawPullRequests,
       identity.id,
     );
+    const myFiltered = filterMyPullRequests(rawMyPullRequests);
     const groupMemberIds = await resolveConfiguredGroupMemberIds(config);
     const enrichedPullRequests = await attachPullRequestLastCommitTimes(
       config,
       filtered,
       groupMemberIds,
     );
+    const [reviewWithReasons, myWithReasons] = await Promise.all([
+      attachPullRequestBlockingReasons(config, enrichedPullRequests),
+      attachPullRequestBlockingReasons(config, myFiltered),
+    ]);
+    const [reviewWithConflicts, myWithConflicts] = await Promise.all([
+      attachPullRequestConflictInfo(config, reviewWithReasons),
+      attachPullRequestConflictInfo(config, myWithReasons),
+    ]);
 
     const items = sortPullRequestsOldestFirst(
-      enrichedPullRequests
+      reviewWithConflicts
+        .map((pr) => mapPullRequestToItem(pr, config))
+        .filter(Boolean),
+    );
+    const myItems = sortMyPullRequestsNewestFirst(
+      myWithConflicts
         .map((pr) => mapPullRequestToItem(pr, config))
         .filter(Boolean),
     );
@@ -186,6 +231,8 @@ async function refreshPullRequests(trigger) {
     const nextState = {
       items,
       count: items.length,
+      myItems,
+      myCount: myItems.length,
       lastCheckedAt: checkedAt,
       lastSuccessAt: checkedAt,
       lastTrigger: trigger,
@@ -424,6 +471,41 @@ async function approvePullRequest(pullRequestId) {
     approved: true,
     state,
     pullRequestId: normalizedPullRequestId,
+  };
+}
+
+/**
+ * Страница завершённых PR текущего пользователя для вкладки My.
+ *
+ * @param {{ skip?: unknown, top?: unknown }} [options]
+ */
+async function loadMyCompletedPullRequests(options = {}) {
+  const config = await loadAdoConfig();
+  const validationErrors = validateAdoConfig(config);
+
+  if (validationErrors.length > 0) {
+    throw new Error(`${validationErrors.join(" ")} Откройте настройки расширения.`);
+  }
+
+  const skip = Math.max(0, Number(options?.skip) || 0);
+  const top = Math.max(1, Number(options?.top) || MY_COMPLETED_PAGE_SIZE);
+  const identity = await fetchConnectionIdentity(config);
+  const myCreatorId = MY_TAB_CREATOR_OVERRIDE_ID || identity.id;
+  const { pullRequests, hasMore } = await listCompletedPullRequestsByCreator(
+    config,
+    myCreatorId,
+    { skip, top },
+  );
+  const items = sortMyPullRequestsNewestFirst(
+    pullRequests
+      .map((pr) => mapPullRequestToItem(pr, config))
+      .filter(Boolean),
+  );
+
+  return {
+    items,
+    hasMore,
+    nextSkip: skip + pullRequests.length,
   };
 }
 

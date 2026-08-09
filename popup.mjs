@@ -10,11 +10,18 @@ import {
 const STORAGE_KEY = "prState";
 const UPDATE_STATE_KEY = "prUpdateState";
 const ADO_CONFIG_KEY = "adoConfig";
+const ACTIVE_TAB_KEY = "popupActiveTab";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
+const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
+const MY_COMPLETED_PAGE_SIZE = 20;
+const TAB_REVIEW = "review";
+const TAB_MY = "my";
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  myItems: [],
+  myCount: 0,
   lastCheckedAt: null,
   lastError: null,
 };
@@ -23,12 +30,15 @@ const countBadge = document.querySelector("#count-badge");
 const lastUpdated = document.querySelector("#last-updated");
 const messageBox = document.querySelector("#message-box");
 const emptyState = document.querySelector("#empty-state");
+const emptyStateText = document.querySelector("#empty-state-text");
 const emptySetupHint = document.querySelector("#empty-setup-hint");
 const emptySetupLink = document.querySelector("#empty-setup-link");
 const itemsList = document.querySelector("#items-list");
 const refreshButton = document.querySelector("#refresh-button");
 const optionsLink = document.querySelector("#options-link");
 const updateChip = document.querySelector("#update-chip");
+const tabReview = document.querySelector("#tab-review");
+const tabMy = document.querySelector("#tab-my");
 
 let isRefreshing = false;
 let transientMessage = "";
@@ -38,6 +48,14 @@ const approvingPullRequestIds = new Set();
 let currentState = { ...DEFAULT_STATE };
 let updateState = { hasUpdate: false, latestVersion: "" };
 let hasConfiguredGroups = false;
+/** @type {"review" | "my"} */
+let activeTab = TAB_REVIEW;
+/** @type {any[]} */
+let myCompletedItems = [];
+let myCompletedHasMore = false;
+let myCompletedLoaded = false;
+let isLoadingMyCompleted = false;
+let myCompletedError = "";
 
 void init();
 
@@ -59,6 +77,7 @@ async function init() {
   currentState = await loadState();
   updateState = await loadUpdateState();
   hasConfiguredGroups = await loadHasConfiguredGroups();
+  activeTab = await loadActiveTab();
   render();
   refreshButton.addEventListener("click", () => {
     void refreshNow();
@@ -68,6 +87,12 @@ async function init() {
   });
   emptySetupLink?.addEventListener("click", () => {
     void chrome.runtime.openOptionsPage();
+  });
+  tabReview?.addEventListener("click", () => {
+    void setActiveTab(TAB_REVIEW);
+  });
+  tabMy?.addEventListener("click", () => {
+    void setActiveTab(TAB_MY);
   });
   window.addEventListener("resize", applyPopupMaxHeight);
 
@@ -81,6 +106,7 @@ async function init() {
         ...DEFAULT_STATE,
         ...(changes[STORAGE_KEY].newValue ?? {}),
       };
+      resetMyCompletedState();
     }
 
     if (changes[ADO_CONFIG_KEY]) {
@@ -120,16 +146,34 @@ function normalizeUpdateState(rawState) {
 
 function render() {
   const hasError = !!currentState.lastError;
+  const isMyTab = activeTab === TAB_MY;
+  const visibleItems = isMyTab
+    ? (Array.isArray(currentState.myItems) ? currentState.myItems : [])
+    : (Array.isArray(currentState.items) ? currentState.items : []);
+  const visibleCount = isMyTab
+    ? (currentState.myCount ?? visibleItems.length)
+    : (currentState.count ?? visibleItems.length);
+  const completedItems = isMyTab ? myCompletedItems : [];
+  const hasListContent = visibleItems.length > 0 || completedItems.length > 0;
+  const waitingCompleted = isMyTab
+    && !hasListContent
+    && (isLoadingMyCompleted || !myCompletedLoaded);
+
+  renderTabs();
+
+  if (isMyTab) {
+    void ensureMyCompletedLoaded();
+  }
 
   if (hasError) {
     countBadge.classList.add("hidden");
   } else {
     countBadge.classList.remove("hidden");
-    countBadge.textContent = String(currentState.count ?? 0);
+    countBadge.textContent = String(visibleCount ?? 0);
     applyCountBadgeStyle("gray");
   }
 
-  lastUpdated.textContent = `Последняя проверка: ${formatTimestamp(currentState.lastCheckedAt)}`;
+  lastUpdated.textContent = formatLastCheckedAt(currentState.lastCheckedAt);
   refreshButton.disabled = isRefreshing;
   refreshButton.setAttribute(
     "aria-label",
@@ -161,18 +205,168 @@ function render() {
 
   itemsList.textContent = "";
 
-  if (!currentState.items.length) {
+  if (!hasListContent && !waitingCompleted) {
     emptyState.classList.remove("hidden");
-    emptySetupHint?.classList.toggle("hidden", hasConfiguredGroups);
+    if (emptyStateText) {
+      emptyStateText.textContent = isMyTab
+        ? (myCompletedError || "Нет ваших активных pull requests")
+        : "Нет pull requests для ревью";
+    }
+    emptySetupHint?.classList.toggle("hidden", isMyTab || hasConfiguredGroups);
     return;
   }
 
   emptyState.classList.add("hidden");
   emptySetupHint?.classList.add("hidden");
 
-  for (const item of sortPullRequestsOldestFirst(currentState.items)) {
-    itemsList.append(createItemElement(item));
+  const orderedItems = isMyTab
+    ? visibleItems
+    : sortPullRequestsOldestFirst(visibleItems);
+
+  for (const item of orderedItems) {
+    itemsList.append(createItemElement(item, { mode: activeTab }));
   }
+
+  if (!isMyTab) {
+    return;
+  }
+
+  for (const item of completedItems) {
+    itemsList.append(createItemElement(item, { mode: TAB_MY }));
+  }
+
+  if (waitingCompleted || (isLoadingMyCompleted && completedItems.length === 0)) {
+    itemsList.append(createMyCompletedStatusRow("Загрузка…"));
+  } else if (myCompletedError && completedItems.length === 0) {
+    itemsList.append(createMyCompletedStatusRow(myCompletedError, { isError: true }));
+  } else if (myCompletedHasMore) {
+    itemsList.append(createShowMoreCompletedButton());
+  }
+}
+
+function resetMyCompletedState() {
+  myCompletedItems = [];
+  myCompletedHasMore = false;
+  myCompletedLoaded = false;
+  isLoadingMyCompleted = false;
+  myCompletedError = "";
+}
+
+async function ensureMyCompletedLoaded() {
+  if (myCompletedLoaded || isLoadingMyCompleted) {
+    return;
+  }
+
+  await loadMoreMyCompleted({ reset: true });
+}
+
+/**
+ * @param {{ reset?: boolean }} [options]
+ */
+async function loadMoreMyCompleted(options = {}) {
+  if (isLoadingMyCompleted) {
+    return;
+  }
+
+  const reset = options.reset === true;
+  isLoadingMyCompleted = true;
+  myCompletedError = "";
+  render();
+
+  try {
+    const skip = reset ? 0 : myCompletedItems.length;
+    const response = await chrome.runtime.sendMessage({
+      type: LOAD_MY_COMPLETED_MESSAGE_TYPE,
+      skip,
+      top: MY_COMPLETED_PAGE_SIZE,
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Не удалось загрузить завершённые pull requests.");
+    }
+
+    const nextItems = Array.isArray(response.items) ? response.items : [];
+    myCompletedItems = reset ? nextItems : [...myCompletedItems, ...nextItems];
+    myCompletedHasMore = Boolean(response.hasMore);
+    myCompletedLoaded = true;
+  } catch (error) {
+    myCompletedError = error instanceof Error ? error.message : String(error);
+    myCompletedLoaded = true;
+    myCompletedHasMore = false;
+  } finally {
+    isLoadingMyCompleted = false;
+    render();
+  }
+}
+
+function createShowMoreCompletedButton() {
+  const row = document.createElement("li");
+  row.className = "popup__load-more";
+
+  const button = document.createElement("button");
+  button.className = "popup__load-more-button";
+  button.type = "button";
+  button.textContent = "Показать ещё";
+  button.disabled = isLoadingMyCompleted;
+  button.addEventListener("click", () => {
+    void loadMoreMyCompleted();
+  });
+
+  row.append(button);
+  return row;
+}
+
+/**
+ * @param {string} text
+ * @param {{ isError?: boolean }} [options]
+ */
+function createMyCompletedStatusRow(text, options = {}) {
+  const row = document.createElement("li");
+  row.className = "popup__load-more";
+
+  const status = document.createElement("p");
+  status.className = options.isError
+    ? "popup__load-more-status popup__load-more-status--error"
+    : "popup__load-more-status";
+  status.textContent = text;
+  row.append(status);
+  return row;
+}
+
+function renderTabs() {
+  const isMyTab = activeTab === TAB_MY;
+
+  tabReview?.classList.toggle("popup__tab--active", !isMyTab);
+  tabMy?.classList.toggle("popup__tab--active", isMyTab);
+  tabReview?.setAttribute("aria-selected", isMyTab ? "false" : "true");
+  tabMy?.setAttribute("aria-selected", isMyTab ? "true" : "false");
+}
+
+async function loadActiveTab() {
+  try {
+    const stored = await chrome.storage.session?.get?.(ACTIVE_TAB_KEY);
+    return normalizeTab(stored?.[ACTIVE_TAB_KEY]);
+  } catch (_error) {
+    return TAB_REVIEW;
+  }
+}
+
+async function setActiveTab(tab) {
+  activeTab = normalizeTab(tab);
+
+  try {
+    await chrome.storage.session?.set?.({
+      [ACTIVE_TAB_KEY]: activeTab,
+    });
+  } catch (_error) {
+    // session storage может быть недоступен — вкладка живёт до закрытия popup
+  }
+
+  render();
+}
+
+function normalizeTab(value) {
+  return value === TAB_MY ? TAB_MY : TAB_REVIEW;
 }
 
 function renderUpdateChip() {
@@ -246,12 +440,20 @@ async function refreshState({ clearTransientMessage, errorPrefix }) {
   }
 }
 
-function createItemElement(item) {
+/**
+ * @param {any} item
+ * @param {{ mode?: "review" | "my" }} [options]
+ */
+function createItemElement(item, options = {}) {
+  const mode = options.mode === TAB_MY ? TAB_MY : TAB_REVIEW;
   const listItem = document.createElement("li");
   listItem.className = "popup__item";
-  const isTechPR = isTechPullRequest(item.description);
+  const isCompleted = mode === TAB_MY && item?.status === "completed";
+  const isTechPR = mode === TAB_REVIEW && isTechPullRequest(item.description);
 
-  const timeUrgency = getItemWorkingTimeUrgency(item, currentState.lastCheckedAt);
+  const timeUrgency = mode === TAB_REVIEW
+    ? getItemWorkingTimeUrgency(item, currentState.lastCheckedAt)
+    : null;
 
   const itemMain = document.createElement("div");
   itemMain.className = "popup__item-main";
@@ -285,7 +487,12 @@ function createItemElement(item) {
 
   const author = document.createElement("p");
   author.className = "popup__author";
-  fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency);
+
+  if (mode === TAB_MY) {
+    fillMyMetaParagraph(author, item);
+  } else {
+    fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency);
+  }
 
   authorRow.append(author);
 
@@ -295,6 +502,29 @@ function createItemElement(item) {
   if (item.description) {
     descriptionUi = createDescriptionBlock(item.description, item.id);
     authorRow.append(descriptionUi.icon);
+  }
+
+  /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
+  let blockersUi = null;
+
+  if (mode === TAB_REVIEW) {
+    blockersUi = createBlockingReasonsToggle(item);
+    if (blockersUi) {
+      authorRow.append(blockersUi.icon);
+    }
+  }
+
+  /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
+  const conflictUi = isCompleted ? null : createConflictToggle(item);
+  if (conflictUi) {
+    authorRow.append(conflictUi.icon);
+  }
+
+  if (isCompleted) {
+    const badge = document.createElement("span");
+    badge.className = "popup__badge popup__badge--complete";
+    badge.textContent = "Complete";
+    authorRow.append(badge);
   }
 
   if (isTechPR) {
@@ -312,6 +542,18 @@ function createItemElement(item) {
 
   itemContent.append(itemHeader, authorRow);
 
+  if (mode === TAB_MY && !isCompleted) {
+    itemContent.append(createBlockingReasonsBlock(item));
+  }
+
+  if (blockersUi) {
+    itemContent.append(blockersUi.section);
+  }
+
+  if (conflictUi) {
+    itemContent.append(conflictUi.section);
+  }
+
   if (descriptionUi) {
     itemContent.append(descriptionUi.section);
   }
@@ -320,6 +562,238 @@ function createItemElement(item) {
   listItem.append(itemMain);
 
   return listItem;
+}
+
+/**
+ * @param {HTMLParagraphElement} el
+ * @param {any} item
+ */
+function fillMyMetaParagraph(el, item) {
+  el.replaceChildren();
+
+  const branch = typeof item.targetBranch === "string" ? item.targetBranch.trim() : "";
+  const dateSource = item?.status === "completed" && item.closedAt
+    ? item.closedAt
+    : item.createdAt;
+  const createdLabel = dateSource ? formatTimestamp(dateSource) : "";
+
+  if (branch) {
+    const branchSpan = document.createElement("span");
+    branchSpan.className = "popup__author-name";
+    branchSpan.textContent = `→ ${branch}`;
+    el.append(branchSpan);
+  }
+
+  if (createdLabel) {
+    if (el.childNodes.length > 0) {
+      const sep = document.createElement("span");
+      sep.className = "popup__author-sep";
+      sep.textContent = " · ";
+      el.append(sep);
+    }
+
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "popup__author-time";
+    timeSpan.textContent = createdLabel;
+    el.append(timeSpan);
+  }
+
+  if (!el.childNodes.length) {
+    el.textContent = item.author || "Ваш pull request";
+  }
+}
+
+/**
+ * @param {any} item
+ */
+function createBlockingReasonsBlock(item) {
+  if (item.blockingReasons === null) {
+    const failed = document.createElement("p");
+    failed.className = "popup__blocker";
+    failed.textContent = "Не удалось загрузить политики Complete";
+    return failed;
+  }
+
+  const reasons = Array.isArray(item.blockingReasons)
+    ? item.blockingReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
+    : [];
+
+  if (reasons.length === 0) {
+    const ready = document.createElement("p");
+    ready.className = "popup__ready";
+    ready.textContent = "Готов к Complete";
+    return ready;
+  }
+
+  return createBlockingReasonsList(reasons);
+}
+
+/**
+ * @param {string[]} reasons
+ */
+function createBlockingReasonsList(reasons) {
+  const list = document.createElement("ul");
+  list.className = "popup__blockers";
+  list.setAttribute("aria-label", "Причины, блокирующие Complete");
+
+  for (const reason of reasons) {
+    const row = document.createElement("li");
+    row.className = "popup__blocker";
+
+    const mark = document.createElement("span");
+    mark.className = "popup__blocker-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = "×";
+
+    const text = document.createElement("span");
+    text.className = "popup__blocker-text";
+    text.textContent = reason;
+
+    row.append(mark, text);
+    list.append(row);
+  }
+
+  return list;
+}
+
+/** Набор причин, при котором бейдж показывает «Votes check» вместо числа. */
+const VOTES_CHECK_ONLY_REASONS = new Set([
+  "0 of 1 reviewers approved",
+  "Votes check",
+  "Required reviewers have not approved",
+]);
+
+/**
+ * @param {string[]} reasons
+ */
+function isVotesCheckOnlyReasons(reasons) {
+  if (reasons.length !== VOTES_CHECK_ONLY_REASONS.size) {
+    return false;
+  }
+
+  return reasons.every((reason) => VOTES_CHECK_ONLY_REASONS.has(reason));
+}
+
+/**
+ * Бейдж с числом замечаний справа от описания: раскрывает список проблемных политик.
+ *
+ * @param {any} item
+ * @returns {{ icon: HTMLSpanElement, section: HTMLDivElement } | null}
+ */
+function createBlockingReasonsToggle(item) {
+  const reasons = Array.isArray(item.blockingReasons)
+    ? item.blockingReasons.map((reason) => String(reason ?? "").trim()).filter(Boolean)
+    : [];
+
+  if (reasons.length === 0) {
+    return null;
+  }
+
+  const section = document.createElement("div");
+  section.className = "popup__item-blockers";
+
+  const panel = document.createElement("div");
+  panel.className = "popup__blockers-panel";
+  panel.hidden = true;
+  panel.setAttribute("role", "region");
+  panel.id = `pr-blockers-${String(item.id).replace(/[^\w-]/g, "_")}`;
+  panel.append(createBlockingReasonsList(reasons));
+  section.append(panel);
+
+  const votesCheckOnly = isVotesCheckOnlyReasons(reasons);
+  const badgeLabel = votesCheckOnly ? "Votes check" : String(reasons.length);
+
+  const badge = document.createElement("span");
+  badge.className = "popup__blockers-badge";
+  badge.setAttribute("role", "button");
+  badge.tabIndex = 0;
+  badge.setAttribute("aria-expanded", "false");
+  badge.setAttribute("aria-controls", panel.id);
+  badge.setAttribute(
+    "aria-label",
+    `Показать или скрыть проблемы политик Complete (${badgeLabel})`,
+  );
+  badge.textContent = badgeLabel;
+
+  const toggle = () => {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    badge.setAttribute("aria-expanded", open ? "true" : "false");
+    section.classList.toggle("popup__item-blockers--open", open);
+  };
+
+  badge.addEventListener("click", (event) => {
+    event.preventDefault();
+    toggle();
+  });
+
+  badge.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
+  });
+
+  return { icon: badge, section };
+}
+
+/**
+ * Бейдж «конфликт» справа от замечаний: раскрывает текст конфликта слияния.
+ *
+ * @param {any} item
+ * @returns {{ icon: HTMLSpanElement, section: HTMLDivElement } | null}
+ */
+function createConflictToggle(item) {
+  const conflictText = typeof item.conflictText === "string" ? item.conflictText.trim() : "";
+
+  if (!conflictText) {
+    return null;
+  }
+
+  const section = document.createElement("div");
+  section.className = "popup__item-conflict";
+
+  const panel = document.createElement("div");
+  panel.className = "popup__conflict-panel";
+  panel.hidden = true;
+  panel.setAttribute("role", "region");
+  panel.id = `pr-conflict-${String(item.id).replace(/[^\w-]/g, "_")}`;
+
+  const body = document.createElement("p");
+  body.className = "popup__conflict-text";
+  body.textContent = conflictText;
+  panel.append(body);
+  section.append(panel);
+
+  const badge = document.createElement("span");
+  badge.className = "popup__conflict-badge";
+  badge.setAttribute("role", "button");
+  badge.tabIndex = 0;
+  badge.setAttribute("aria-expanded", "false");
+  badge.setAttribute("aria-controls", panel.id);
+  badge.setAttribute("aria-label", "Показать или скрыть конфликт слияния");
+  badge.textContent = "CONFLICT";
+
+  const toggle = () => {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    badge.setAttribute("aria-expanded", open ? "true" : "false");
+    section.classList.toggle("popup__item-conflict--open", open);
+  };
+
+  badge.addEventListener("click", (event) => {
+    event.preventDefault();
+    toggle();
+  });
+
+  badge.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
+  });
+
+  return { icon: badge, section };
 }
 
 const DESC_ICON_SVG = `<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" aria-hidden="true">
@@ -483,6 +957,39 @@ function formatTimestamp(timestamp) {
   }
 
   const date = new Date(timestamp);
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(date);
+}
+
+/**
+ * Время последней проверки: сегодня — только время, иначе дата и время.
+ *
+ * @param {string | null | undefined} timestamp
+ */
+function formatLastCheckedAt(timestamp) {
+  if (!timestamp) {
+    return "ещё не выполнялась";
+  }
+
+  const date = new Date(timestamp);
+
+  if (Number.isNaN(date.getTime())) {
+    return "ещё не выполнялась";
+  }
+
+  const now = new Date();
+  const isToday = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+
+  if (isToday) {
+    return new Intl.DateTimeFormat("ru-RU", {
+      timeStyle: "short",
+    }).format(date);
+  }
 
   return new Intl.DateTimeFormat("ru-RU", {
     dateStyle: "short",

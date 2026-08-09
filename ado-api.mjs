@@ -182,34 +182,65 @@ export async function fetchConnectionIdentity(config) {
 }
 
 /**
- * Список активных PR. При переданном reviewerId сервер отдаёт только PR, где эта identity в reviewers
- * (см. searchCriteria.reviewerId в Git REST API), без обхода всех активных PR репозитория.
+ * Одна страница PR по searchCriteria (Git REST API).
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
- * @param {string | null} reviewerId
+ * @param {{
+ *   status?: string,
+ *   reviewerId?: string | null,
+ *   creatorId?: string | null,
+ *   top?: number,
+ *   skip?: number,
+ * }} [criteria]
  */
-async function listActivePullRequests(config, reviewerId = null) {
+async function listPullRequestsPage(config, criteria = {}) {
+  const status = String(criteria?.status ?? "active").trim() || "active";
+  const reviewerId = criteria?.reviewerId ?? null;
+  const creatorId = criteria?.creatorId ?? null;
+  const top = Math.max(1, Number(criteria?.top) || PAGE_SIZE);
+  const skip = Math.max(0, Number(criteria?.skip) || 0);
   const project = encodeURIComponent(config.project.trim());
   const repo = encodeURIComponent(config.repositoryId.trim());
   const basePath = `${project}/_apis/git/repositories/${repo}/pullrequests`;
 
+  const query = new URLSearchParams({
+    "searchCriteria.status": status,
+    "api-version": resolveApiVersion(config),
+    "$top": String(top),
+    "$skip": String(skip),
+  });
+
+  if (reviewerId) {
+    query.set("searchCriteria.reviewerId", String(reviewerId).trim());
+  }
+
+  if (creatorId) {
+    query.set("searchCriteria.creatorId", String(creatorId).trim());
+  }
+
+  const data = await adoFetch(config, `${basePath}?${query.toString()}`);
+  return Array.isArray(data?.value) ? data.value : [];
+}
+
+/**
+ * Список активных PR. При переданном reviewerId / creatorId сервер фильтрует через
+ * searchCriteria (см. Git REST API), без обхода всех активных PR репозитория.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {{ reviewerId?: string | null, creatorId?: string | null }} [criteria]
+ */
+async function listActivePullRequests(config, criteria = {}) {
   const all = [];
   let skip = 0;
 
   for (;;) {
-    const query = new URLSearchParams({
-      "searchCriteria.status": "active",
-      "api-version": resolveApiVersion(config),
-      "$top": String(PAGE_SIZE),
-      "$skip": String(skip),
+    const batch = await listPullRequestsPage(config, {
+      status: "active",
+      reviewerId: criteria?.reviewerId ?? null,
+      creatorId: criteria?.creatorId ?? null,
+      top: PAGE_SIZE,
+      skip,
     });
-
-    if (reviewerId) {
-      query.set("searchCriteria.reviewerId", String(reviewerId).trim());
-    }
-
-    const data = await adoFetch(config, `${basePath}?${query.toString()}`);
-    const batch = Array.isArray(data?.value) ? data.value : [];
 
     all.push(...batch);
 
@@ -254,8 +285,655 @@ export async function listActivePullRequestsForAllowedReviewers(config, reviewer
     return [];
   }
 
-  const batches = await Promise.all(ids.map((id) => listActivePullRequests(config, id)));
+  const batches = await Promise.all(
+    ids.map((id) => listActivePullRequests(config, { reviewerId: id })),
+  );
   return dedupePullRequestsById(batches.flat());
+}
+
+/**
+ * Активные PR, созданные указанным пользователем.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {string} creatorId
+ */
+export async function listActivePullRequestsByCreator(config, creatorId) {
+  const id = String(creatorId ?? "").trim();
+
+  if (!id) {
+    return [];
+  }
+
+  return listActivePullRequests(config, { creatorId: id });
+}
+
+/**
+ * Страница завершённых (Complete) PR, созданных указанным пользователем.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {string} creatorId
+ * @param {{ top?: number, skip?: number }} [options]
+ * @returns {Promise<{ pullRequests: Array<any>, hasMore: boolean }>}
+ */
+export async function listCompletedPullRequestsByCreator(config, creatorId, options = {}) {
+  const id = String(creatorId ?? "").trim();
+  const top = Math.max(1, Number(options?.top) || 10);
+  const skip = Math.max(0, Number(options?.skip) || 0);
+
+  if (!id) {
+    return { pullRequests: [], hasMore: false };
+  }
+
+  const pullRequests = await listPullRequestsPage(config, {
+    status: "completed",
+    creatorId: id,
+    top,
+    skip,
+  });
+
+  return {
+    pullRequests,
+    hasMore: pullRequests.length >= top,
+  };
+}
+
+/**
+ * TEMP для тестирования вкладки My: identity id вместо текущего пользователя.
+ * После QA вернуть `null`.
+ */
+export const MY_TAB_CREATOR_OVERRIDE_ID = null;
+
+const POLICY_TYPE_MINIMUM_REVIEWERS = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd";
+const POLICY_TYPE_REQUIRED_REVIEWERS = "fd2167ab-b0be-447a-8ec8-39368250530e";
+const POLICY_TYPE_COMMENT_REQUIREMENTS = "c6a1889d-b943-4856-b76f-9e46bb6b0df2";
+const POLICY_TYPE_WORK_ITEM_LINKING = "40e92b44-2fe1-4dd6-b3d8-74a9c21d0c6e";
+const POLICY_TYPE_BUILD = "0609b952-1397-4640-95ec-e00a01b2c241";
+const POLICY_TYPE_STATUS = "cbdc66da-9728-4af8-aada-9a5a32e4a226";
+/** В overview Policies ADO обычно не показывает — только при Complete. */
+const POLICY_TYPE_MERGE_STRATEGY = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab";
+const projectIdCache = new Map();
+
+function resolvePolicyEvaluationsApiVersion(config) {
+  const ver = resolveApiVersion(config);
+
+  if (/preview\.\d+$/i.test(ver)) {
+    return ver;
+  }
+
+  if (/preview$/i.test(ver)) {
+    return `${ver}.1`;
+  }
+
+  return `${ver}-preview.1`;
+}
+
+function isGuidString(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    String(value ?? "").trim(),
+  );
+}
+
+function projectIdCacheKey(config) {
+  return [
+    normalizeApiRoot(config.apiRoot),
+    resolveApiVersion(config),
+    String(config.project ?? "").trim().toLowerCase(),
+  ].join("|");
+}
+
+/**
+ * GUID проекта для artifactId policy evaluations.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {any} [pullRequest]
+ */
+async function resolveProjectId(config, pullRequest = null) {
+  const fromPr = normalizePlainText(
+    pullRequest?.repository?.project?.id
+      ?? pullRequest?.repository?.project?.Id
+      ?? "",
+  );
+
+  if (isGuidString(fromPr)) {
+    return fromPr;
+  }
+
+  const cacheKey = projectIdCacheKey(config);
+
+  if (projectIdCache.has(cacheKey)) {
+    return projectIdCache.get(cacheKey);
+  }
+
+  const projectSeg = encodeURIComponent(config.project.trim());
+  const query = new URLSearchParams({
+    "api-version": resolveApiVersion(config),
+  });
+  const data = await adoFetch(config, `_apis/projects/${projectSeg}?${query.toString()}`);
+  const projectId = normalizePlainText(data?.id ?? data?.Id ?? "");
+
+  if (!isGuidString(projectId)) {
+    throw new Error("Не удалось определить GUID проекта для policy evaluations.");
+  }
+
+  projectIdCache.set(cacheKey, projectId);
+  return projectId;
+}
+
+function buildPullRequestPolicyArtifactId(projectId, pullRequestId) {
+  return `vstfs:///CodeReview/CodeReviewId/${projectId}/${pullRequestId}`;
+}
+
+/**
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {any} pullRequest
+ */
+async function fetchPullRequestPolicyEvaluations(config, pullRequest) {
+  const prId = pullRequest?.pullRequestId;
+
+  if (prId == null) {
+    return [];
+  }
+
+  const projectId = await resolveProjectId(config, pullRequest);
+  const projectSeg = encodeURIComponent(
+    normalizePlainText(
+      pullRequest?.repository?.project?.name
+        ?? pullRequest?.repository?.project?.Name
+        ?? config.project,
+    ),
+  );
+  const artifactId = buildPullRequestPolicyArtifactId(projectId, prId);
+  const query = new URLSearchParams({
+    artifactId,
+    "api-version": resolvePolicyEvaluationsApiVersion(config),
+  });
+  const data = await adoFetch(
+    config,
+    `${projectSeg}/_apis/policy/evaluations?${query.toString()}`,
+  );
+
+  return Array.isArray(data?.value) ? data.value : Array.isArray(data) ? data : [];
+}
+
+/**
+ * Статусы PR (для текстов Status policy, как в ADO UI).
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {any} pullRequest
+ */
+async function fetchPullRequestStatuses(config, pullRequest) {
+  const prId = pullRequest?.pullRequestId;
+
+  if (prId == null) {
+    return [];
+  }
+
+  const projectSeg = encodeURIComponent(
+    normalizePlainText(
+      pullRequest?.repository?.project?.name
+        ?? pullRequest?.repository?.project?.Name
+        ?? config.project,
+    ),
+  );
+  const repoSeg = encodeURIComponent(
+    normalizePlainText(
+      pullRequest?.repository?.id
+        ?? pullRequest?.repository?.name
+        ?? config.repositoryId,
+    ),
+  );
+  const prIdSeg = encodeURIComponent(String(prId).trim());
+  const query = new URLSearchParams({
+    "api-version": resolveApiVersion(config),
+  });
+  const data = await adoFetch(
+    config,
+    `${projectSeg}/_apis/git/repositories/${repoSeg}/pullRequests/${prIdSeg}/statuses?${query.toString()}`,
+  );
+
+  return Array.isArray(data?.value) ? data.value : [];
+}
+
+/**
+ * @param {Array<any>} statuses
+ * @returns {Map<number, any>}
+ */
+function indexPullRequestStatusesById(statuses) {
+  /** @type {Map<number, any>} */
+  const byId = new Map();
+
+  for (const status of statuses) {
+    const id = Number(status?.id);
+
+    if (!Number.isFinite(id)) {
+      continue;
+    }
+
+    byId.set(id, status);
+  }
+
+  return byId;
+}
+
+function isBlockingPolicyEvaluation(evaluation) {
+  const configuration = evaluation?.configuration;
+
+  if (!configuration || typeof configuration !== "object") {
+    return false;
+  }
+
+  if (configuration.isEnabled === false || configuration.isDeleted === true) {
+    return false;
+  }
+
+  if (configuration.isBlocking !== true) {
+    return false;
+  }
+
+  const typeId = normalizePlainText(configuration?.type?.id).toLowerCase();
+
+  // Merge strategy в overview Policies не выводится — только при Complete.
+  if (typeId === POLICY_TYPE_MERGE_STRATEGY) {
+    return false;
+  }
+
+  const status = String(evaluation?.status ?? "").toLowerCase();
+
+  return status !== "approved" && status !== "notapplicable";
+}
+
+function countBlockingIndividualReviewers(pullRequest) {
+  const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
+
+  return reviewers.filter((reviewer) => {
+    if (reviewer?.isContainer === true) {
+      return false;
+    }
+
+    return Number(reviewer?.vote ?? 0) < 0;
+  }).length;
+}
+
+function countApprovedReviewers(pullRequest) {
+  const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
+
+  return reviewers.filter((reviewer) => {
+    if (reviewer?.isContainer === true) {
+      return false;
+    }
+
+    return Number(reviewer?.vote ?? 0) >= 10;
+  }).length;
+}
+
+/**
+ * Человекочитаемая причина в духе блока Policies → Required в ADO.
+ *
+ * @param {any} evaluation
+ * @param {any} [pullRequest]
+ * @param {Map<number, any>} [statusById]
+ * @returns {string | null}
+ */
+function formatPolicyBlockingReason(evaluation, pullRequest = null, statusById = null) {
+  const configuration = evaluation?.configuration ?? {};
+  const settings = configuration?.settings && typeof configuration.settings === "object"
+    ? configuration.settings
+    : {};
+  const context = evaluation?.context && typeof evaluation.context === "object"
+    ? evaluation.context
+    : {};
+  const type = configuration?.type && typeof configuration.type === "object"
+    ? configuration.type
+    : {};
+  const typeId = normalizePlainText(type.id).toLowerCase();
+  const typeName = normalizePlainText(type.displayName);
+  const status = String(evaluation?.status ?? "").toLowerCase();
+
+  if (
+    typeId === POLICY_TYPE_MINIMUM_REVIEWERS
+    || /minimum (number of )?reviewers|minimum approval count|approval count/i.test(typeName)
+  ) {
+    const allowDownvotes = settings.allowDownvotes === true;
+    const blockers = countBlockingIndividualReviewers(pullRequest);
+
+    if (!allowDownvotes && blockers > 0) {
+      return blockers === 1
+        ? "1 reviewer is blocking"
+        : `${blockers} reviewers are blocking`;
+    }
+
+    const minimum = Number(
+      context.minimumApproverCount ?? settings.minimumApproverCount ?? NaN,
+    );
+    const actual = Number.isFinite(Number(
+      context.approverCount
+        ?? context.actualApproverCount
+        ?? context.approvedCount
+        ?? context.approveCount,
+    ))
+      ? Number(
+        context.approverCount
+          ?? context.actualApproverCount
+          ?? context.approvedCount
+          ?? context.approveCount,
+      )
+      : countApprovedReviewers(pullRequest);
+
+    if (Number.isFinite(minimum) && minimum > 0) {
+      return `${Number.isFinite(actual) ? actual : 0} of ${minimum} reviewers approved`;
+    }
+
+    return typeName || "Minimum number of reviewers";
+  }
+
+  if (
+    typeId === POLICY_TYPE_REQUIRED_REVIEWERS
+    || /^required reviewers$/i.test(typeName)
+  ) {
+    return "Required reviewers have not approved";
+  }
+
+  if (
+    typeId === POLICY_TYPE_COMMENT_REQUIREMENTS
+    || /^comment requirements$/i.test(typeName)
+  ) {
+    return "Not all comments resolved";
+  }
+
+  if (
+    typeId === POLICY_TYPE_WORK_ITEM_LINKING
+    || /work item linking/i.test(typeName)
+  ) {
+    return "Work items not linked";
+  }
+
+  if (typeId === POLICY_TYPE_BUILD || /^build$/i.test(typeName)) {
+    const name = normalizePlainText(settings.displayName) || typeName || "Build";
+
+    if (context.isExpired === true) {
+      return `${name} expired`;
+    }
+
+    if (status === "running") {
+      return `${name} — выполняется`;
+    }
+
+    if (status === "broken") {
+      return `${name} — ошибка проверки`;
+    }
+
+    return name;
+  }
+
+  if (typeId === POLICY_TYPE_STATUS || /^status$/i.test(typeName)) {
+    const latestStatusId = Number(context.latestStatusId);
+    const linkedStatus = Number.isFinite(latestStatusId) && statusById instanceof Map
+      ? statusById.get(latestStatusId)
+      : null;
+    const fromStatus = normalizePlainText(linkedStatus?.description);
+    const name = fromStatus
+      || normalizePlainText(settings.defaultDisplayName)
+      || normalizePlainText(settings.displayName)
+      || typeName
+      || "Status";
+
+    return name;
+  }
+
+  const reason = normalizePlainText(settings.displayName)
+    || normalizePlainText(settings.defaultDisplayName)
+    || normalizePlainText(
+      context.message
+        ?? context.statusMessage
+        ?? context.errorMessage
+        ?? context.displayName
+        ?? "",
+    )
+    || typeName;
+
+  return reason || null;
+}
+
+/**
+ * Для каждого PR подмешивает `blockingReasons` — required-политики, из‑за которых
+ * Complete недоступен (как блок Policies → Required в ADO).
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {Array<any>} pullRequests
+ */
+export async function attachPullRequestBlockingReasons(config, pullRequests) {
+  return Promise.all(
+    pullRequests.map(async (pullRequest) => {
+      const prId = pullRequest?.pullRequestId;
+
+      if (prId == null) {
+        return pullRequest;
+      }
+
+      try {
+        const [evaluations, statuses] = await Promise.all([
+          fetchPullRequestPolicyEvaluations(config, pullRequest),
+          fetchPullRequestStatuses(config, pullRequest).catch((error) => {
+            logAdoError(`fetchPullRequestStatuses ${prId}`, error);
+            return [];
+          }),
+        ]);
+        const statusById = indexPullRequestStatusesById(statuses);
+        const blockingReasons = [];
+        const seen = new Set();
+
+        for (const evaluation of evaluations) {
+          if (!isBlockingPolicyEvaluation(evaluation)) {
+            continue;
+          }
+
+          const reason = formatPolicyBlockingReason(evaluation, pullRequest, statusById);
+
+          if (!reason || seen.has(reason)) {
+            continue;
+          }
+
+          seen.add(reason);
+          blockingReasons.push(reason);
+        }
+
+        return {
+          ...pullRequest,
+          blockingReasons,
+        };
+      } catch (error) {
+        logAdoError(`fetchPullRequestPolicyEvaluations ${prId}`, error);
+        return {
+          ...pullRequest,
+          blockingReasons: null,
+        };
+      }
+    }),
+  );
+}
+
+function hasPullRequestMergeConflicts(pullRequest) {
+  return String(pullRequest?.mergeStatus ?? "").toLowerCase() === "conflicts";
+}
+
+/**
+ * api-version для Git Conflicts (preview-ресурс).
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ */
+function resolveConflictsApiVersion(config) {
+  const ver = resolveApiVersion(config);
+
+  if (/preview/i.test(ver)) {
+    return ver;
+  }
+
+  return `${ver}-preview`;
+}
+
+/**
+ * @param {string} conflictType
+ */
+function formatConflictTypeLabel(conflictType) {
+  switch (String(conflictType ?? "").toLowerCase()) {
+    case "addadd":
+      return "Added in both";
+    case "addrename":
+      return "Added in source, renamed in target";
+    case "deleteedit":
+      return "Deleted in source, edited in target";
+    case "deleterename":
+      return "Deleted in source, renamed in target";
+    case "directoryfile":
+      return "Directory in source, file in target";
+    case "filedirectory":
+      return "File in source, directory in target";
+    case "editdelete":
+      return "Edited in source, deleted in target";
+    case "editedit":
+      return "Edited in both";
+    case "renameadd":
+      return "Renamed in source, added in target";
+    case "renamedelete":
+      return "Renamed in source, deleted in target";
+    case "renamerename":
+      return "Renamed in both";
+    default:
+      return normalizePlainText(conflictType) || "Conflict";
+  }
+}
+
+/**
+ * @param {number} count
+ */
+function formatConflictSummaryMessage(count) {
+  if (count === 1) {
+    return "1 conflict prevents automatic merging";
+  }
+
+  if (count > 1) {
+    return `${count} conflicts prevent automatic merging`;
+  }
+
+  return "Conflict prevents automatic merging";
+}
+
+/**
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {any} pullRequest
+ */
+async function fetchPullRequestConflicts(config, pullRequest) {
+  const prId = pullRequest?.pullRequestId;
+
+  if (prId == null) {
+    return [];
+  }
+
+  const projectSeg = encodeURIComponent(
+    normalizePlainText(
+      pullRequest?.repository?.project?.name
+        ?? pullRequest?.repository?.project?.Name
+        ?? config.project,
+    ),
+  );
+  const repoSeg = encodeURIComponent(
+    normalizePlainText(
+      pullRequest?.repository?.id
+        ?? pullRequest?.repository?.name
+        ?? config.repositoryId,
+    ),
+  );
+  const prIdSeg = encodeURIComponent(String(prId).trim());
+  const query = new URLSearchParams({
+    "api-version": resolveConflictsApiVersion(config),
+  });
+  const data = await adoFetch(
+    config,
+    `${projectSeg}/_apis/git/repositories/${repoSeg}/pullRequests/${prIdSeg}/conflicts?${query.toString()}`,
+  );
+
+  return Array.isArray(data?.value) ? data.value : [];
+}
+
+/**
+ * @param {Array<any>} conflicts
+ */
+function formatConflictText(conflicts) {
+  const rows = Array.isArray(conflicts) ? conflicts : [];
+  const fileLines = [];
+
+  for (const conflict of rows) {
+    const path = normalizePlainText(conflict?.conflictPath).replace(/^\//, "");
+    const typeLabel = formatConflictTypeLabel(conflict?.conflictType);
+
+    if (!path) {
+      continue;
+    }
+
+    fileLines.push(`${path} — ${typeLabel}`);
+  }
+
+  const summary = formatConflictSummaryMessage(fileLines.length || rows.length);
+  return fileLines.length > 0 ? `${summary}\n\n${fileLines.join("\n")}` : summary;
+}
+
+/**
+ * Для PR с `mergeStatus: conflicts` подмешивает `conflictText` (как баннер Conflicts в ADO).
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {Array<any>} pullRequests
+ */
+export async function attachPullRequestConflictInfo(config, pullRequests) {
+  return Promise.all(
+    pullRequests.map(async (pullRequest) => {
+      if (!hasPullRequestMergeConflicts(pullRequest)) {
+        return pullRequest;
+      }
+
+      const prId = pullRequest?.pullRequestId;
+
+      try {
+        const conflicts = await fetchPullRequestConflicts(config, pullRequest);
+        return {
+          ...pullRequest,
+          conflictText: formatConflictText(conflicts),
+        };
+      } catch (error) {
+        logAdoError(`fetchPullRequestConflicts ${prId}`, error);
+        return {
+          ...pullRequest,
+          conflictText: formatConflictSummaryMessage(0),
+        };
+      }
+    }),
+  );
+}
+
+/**
+ * Активные не-draft PR текущего пользователя (создателя).
+ *
+ * @param {Array<any>} pullRequests
+ */
+export function filterMyPullRequests(pullRequests) {
+  return pullRequests.filter((pullRequest) => isVisiblePullRequestForExtension(pullRequest));
+}
+
+/**
+ * @param {Array<{ createdAt?: string | null, id?: string }>} items
+ */
+export function sortMyPullRequestsNewestFirst(items) {
+  return [...items].sort((left, right) => {
+    const leftTs = Date.parse(left?.createdAt ?? "") || 0;
+    const rightTs = Date.parse(right?.createdAt ?? "") || 0;
+
+    if (rightTs !== leftTs) {
+      return rightTs - leftTs;
+    }
+
+    return String(right?.id ?? "").localeCompare(String(left?.id ?? ""), undefined, {
+      numeric: true,
+    });
+  });
 }
 
 function commitTimestampCacheKey(config, project, repo, commitId) {
@@ -1472,6 +2150,16 @@ function isActivePullRequestStatus(status) {
   return String(status).toLowerCase() === "active";
 }
 
+function normalizeTargetBranch(refName) {
+  const raw = normalizePlainText(refName);
+
+  if (!raw) {
+    return "";
+  }
+
+  return raw.replace(/^refs\/heads\//i, "");
+}
+
 export function mapPullRequestToItem(pr, config) {
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const project = config.project.trim();
@@ -1486,13 +2174,32 @@ export function mapPullRequestToItem(pr, config) {
   const author = normalizePlainText(pr?.createdBy?.displayName ?? "");
   const avatarUrl = pickPullRequestAuthorAvatarUrl(pr?.createdBy, config.apiRoot);
   const createdAt = normalizeIsoDate(pr?.creationDate);
+  const closedAt = normalizeIsoDate(pr?.closedDate);
+  const status = normalizePullRequestStatus(pr?.status);
   const updatedAt = pickLatestIsoDate(
     normalizeIsoDate(pr?.lastGroupCommentAt),
     normalizeIsoDate(pr?.lastCommitAt),
+    closedAt,
     createdAt,
   );
   const description = normalizeDescription(pr?.description ?? "");
   const url = buildPullRequestWebUrl(apiRoot, project, repo, id, pr);
+  const targetBranch = normalizeTargetBranch(
+    pr?.targetRefName ?? pr?.TargetRefName ?? "",
+  );
+  /** @type {string[] | null | undefined} */
+  let blockingReasons;
+
+  if (pr?.blockingReasons === null) {
+    blockingReasons = null;
+  } else if (Array.isArray(pr?.blockingReasons)) {
+    blockingReasons = pr.blockingReasons
+      .map((reason) => normalizePlainText(reason))
+      .filter(Boolean);
+  }
+
+  const rawConflictText = typeof pr?.conflictText === "string" ? pr.conflictText.trim() : "";
+  const conflictText = rawConflictText || "";
 
   if (!title || !url) {
     return null;
@@ -1505,11 +2212,50 @@ export function mapPullRequestToItem(pr, config) {
     avatarUrl,
     createdAt,
     updatedAt,
+    status,
     lastCommitAt: normalizeIsoDate(pr?.lastCommitAt) || undefined,
     lastGroupCommentAt: normalizeIsoDate(pr?.lastGroupCommentAt) || undefined,
     description,
     url,
+    ...(closedAt ? { closedAt } : {}),
+    ...(targetBranch ? { targetBranch } : {}),
+    ...(blockingReasons !== undefined ? { blockingReasons } : {}),
+    ...(conflictText ? { conflictText } : {}),
   };
+}
+
+/**
+ * @param {unknown} status
+ * @returns {"active" | "abandoned" | "completed" | "unknown"}
+ */
+function normalizePullRequestStatus(status) {
+  if (status === undefined || status === null || status === "") {
+    return "active";
+  }
+
+  if (typeof status === "number") {
+    if (status === 1) {
+      return "active";
+    }
+
+    if (status === 2) {
+      return "abandoned";
+    }
+
+    if (status === 3) {
+      return "completed";
+    }
+
+    return "unknown";
+  }
+
+  const normalized = String(status).toLowerCase();
+
+  if (normalized === "active" || normalized === "abandoned" || normalized === "completed") {
+    return normalized;
+  }
+
+  return "unknown";
 }
 
 function pickLatestIsoDate(...values) {

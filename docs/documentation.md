@@ -4,7 +4,17 @@
 
 ## Назначение
 
-Расширение **PR Notify** для **Google Chrome** показывает активные pull request’ы в **Git-репозитории Azure DevOps**, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы). Данные получаются через **REST API** (`_apis/...`).
+Расширение **PR Notify** для **Google Chrome** показывает pull request’ы в **Git-репозитории Azure DevOps** в popup с двумя вкладками:
+
+- вкладка **Review** — активные PR, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы);
+- вкладка **My PRs** — PR, **созданные** текущим пользователем: сначала **активные**, ниже — завершённые (**Complete**), с догрузкой по 10.
+
+В списках дополнительно:
+
+- **Policies** — проблемы required-политик, из‑за которых недоступен Complete (на Review — раскрываемый бейдж; на My PRs у активных — список под карточкой);
+- **конфликты слияния** — бейдж «конфликт» и текст из Conflicts API (Review и активные My PRs).
+
+Данные получаются через **REST API** (`_apis/...`).
 
 Страница настроек: [`options.html`](../options.html), логика — [`options.mjs`](../options.mjs).
 
@@ -69,6 +79,8 @@
 
 Реализация в [`ado-api.mjs`](../ado-api.mjs) и вызовы из [`background.mjs`](../background.mjs).
 
+### Review (на ревью)
+
 1. Загружается конфиг; при ошибках валидации обновление не идёт в API, в состояние пишется понятная ошибка.
 2. Определяется текущий пользователь: **`/_apis/connectionData`** → `authenticatedUser.id`.
 3. Строится контекст ревьюеров: **вы** + набор identity id групп (`getExtensionReviewerContext`): либо **только выбранные** в настройках `selectedGroupIds`, либо если **ничего не выбрано** — все найденные reviewer-группы пользователя (после загрузки memberships и фильтрации «групп ревьюеров»).
@@ -77,40 +89,131 @@
 6. Остаются PR, где среди `reviewers` есть участник с **`vote === 0`** и `id` из множества: **вы ∪ выбранные группы** (или вы ∪ все reviewer-группы, если выбор пуст).
 7. Результат сортируется в [`sortPullRequestsOldestFirst`](../working-time.mjs): сначала PR, **ожидающие ревью** (есть новые пуши после последнего комментария группы или комментария ещё не было) — **старые выше** по **`updatedAt`**; PR **без новых обновлений** после комментария группы — **в конце** списка (см. раздел «Рабочее время и срочность»).
 
+### My PRs PRs (мои PR)
+
+Вкладка **My PRs** показывает PR текущего пользователя как **создателя** (`searchCriteria.creatorId` = id из `connectionData`; для QA может быть временно переопределён `MY_TAB_CREATOR_OVERRIDE_ID` в [`ado-api.mjs`](../ado-api.mjs)).
+
+#### Активные PR
+
+Параллельно с обновлением Review (`refreshPullRequests`):
+
+1. Запрос активных PR с **`searchCriteria.creatorId`**.
+2. Отбрасываются черновики и неактивные статусы (как в Review).
+3. Для каждого активного PR подмешиваются **Policies** (`blockingReasons`) и при необходимости **конфликты** (`conflictText`) — см. разделы ниже.
+4. В элемент UI дополнительно: `targetBranch` (целевая ветка без `refs/heads/`), `status`.
+5. Сортировка: **новые выше** по `createdAt` (`sortMyPullRequestsNewestFirst`).
+6. Результат пишется в `prState.myItems` / `myCount` (счётчик вкладки и `#count-badge` на My PRs — только активные).
+
+#### Завершённые PR (Complete)
+
+Не входят в периодический `prState`: popup догружает их **по запросу** при открытии вкладки My PRs (и после обновления списка — кэш Complete сбрасывается).
+
+1. Сообщение в background: **`load-my-completed-pull-requests`** с `$top` / `$skip` (по умолчанию **10**).
+2. REST: `searchCriteria.status = completed`, тот же `creatorId`.
+3. Без загрузки политик и конфликтов; маппинг в UI-элементы со `status: completed`, при наличии — `closedAt` из `closedDate`.
+4. В списке: **после всех активных**; у карточки бейдж **Complete**, дата закрытия вместо даты создания; причин Policies нет.
+5. Если порция полная (10) — кнопка **«Показать ещё»** подгружает следующую страницу; состояние Complete хранится в памяти popup до закрытия или до сброса при смене `prState`.
+
+Пустое состояние My PRs («Нет ваших активных pull requests») — только если нет ни активных, ни загруженных Complete (и загрузка Complete уже завершилась).
+
+## Policies (required) — проблемы Complete
+
+Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **активных** PR **обеих** вкладок (Review и My PRs PRs PRs).
+
+### API
+
+1. **`GET {project}/_apis/policy/evaluations?artifactId=vstfs:///CodeReview/CodeReviewId/{projectGuid}/{pullRequestId}`**  
+   (`api-version` для endpoint — preview, например `6.0-preview.1`).
+2. Параллельно (best-effort): **`GET .../pullRequests/{id}/statuses`** — для текстов status-политик.
+3. В `blockingReasons` попадают только **required** политики (`isBlocking === true`, включённые), у которых статус **не** `approved` / `notApplicable` — как красные пункты в блоке Policies в ADO.
+4. При ошибке запроса: `blockingReasons = null` (в UI — сообщение об ошибке загрузки).
+
+### Тексты причин
+
+Ближе к overview Policies в ADO:
+
+| Тип политики | Пример текста |
+|--------------|---------------|
+| Minimum reviewers + downvote | `1 reviewer is blocking` / `N reviewers are blocking` |
+| Minimum reviewers без downvote | `N of M reviewers approved` |
+| Required reviewers | `Required reviewers have not approved` |
+| Comment requirements | `Not all comments resolved` |
+| Build с `context.isExpired` | `{displayName} expired` |
+| Status policy | `description` из PR statuses / `defaultDisplayName` (например `Votes check`) |
+| Merge strategy | **не** включается (в overview ADO тоже не показывается) |
+
+### UI
+
+| Вкладка | Показ |
+|---------|--------|
+| **Review** | Если есть проблемные политики — розовый бейдж с **красным числом** замечаний; клик раскрывает/сворачивает список (красный «×» + текст). |
+| **My PRs** (активные) | Под карточкой всегда: список причин, либо **«Готов к Complete»** (пустой массив), либо **«Не удалось загрузить политики Complete»** (`null`). |
+| **My PRs** (Complete) | Policies не загружаются и не показываются. |
+
+Поле в элементе списка: **`blockingReasons`**: `string[]` | `null` | отсутствует.
+
+## Конфликты слияния
+
+Реализация: [`attachPullRequestConflictInfo`](../ado-api.mjs). Для активных PR Review и My PRs, у которых **`mergeStatus === conflicts`**.
+
+### API
+
+1. **`GET .../pullRequests/{id}/conflicts`** (preview `api-version`).
+2. В объект пишется **`conflictText`**:
+   - сводка вида `N conflict(s) prevent(s) automatic merging`;
+   - строки `path — type` (например `Edited in both`), как в баннере Conflicts в ADO;
+   - при ошибке запроса — только общая сводка без списка файлов.
+
+### UI
+
+- В строке метаданных — ярко-красный бейдж **«конфликт»** (белый текст); клик раскрывает/сворачивает панель с `conflictText`.
+- На вкладке My PRs у карточек **Complete** конфликты не запрашиваются и бейдж не показывается.
+
+Поле в элементе списка: **`conflictText`** (строка; отсутствует, если конфликтов нет).
+
 ## Обогащение PR перед UI
 
 После фильтрации фон вызывает [`resolveConfiguredGroupMemberIds`](../ado-api.mjs) — user id участников **сохранённых** reviewer-групп (Identities API, `ExpandedDown`, кэш 5 мин).
 
-Для **каждого** PR:
+Порядок в [`refreshPullRequests`](../background.mjs):
 
-1. **`GET .../pullrequests/{id}?includeCommits=true`**:
-   - в объект подмешивается **полное** поле `description` (в списке API оно часто усечено);
-   - вычисляется **`lastCommitAt`**: `push.date` или **`GET .../pushes/{pushId}`** (приоритет), затем **`GET .../commits/{commitId}`**, в конце — `author`/`committer` из PR (кэш по commit/push).
+1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для отфильтрованных PR на ревью:
+   - **`GET .../pullrequests/{id}?includeCommits=true`**: полное `description`; **`lastCommitAt`** из push/commit (кэш);
+   - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system).
 
-2. Если есть участники групп:
-   - **`GET .../pullRequests/{id}/threads`**;
-   - ищется **`lastGroupCommentAt`** — последний **не system** комментарий участника группы, который **открывает тред** (`comments[0]` в ветке); ответы внутри ветки не учитываются.
+2. **Review и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` (см. раздел «Policies»).
+
+3. **Review и My PRs (активные)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
+
+Завершённые PR на My PRs (Complete) этим пайплайном **не** проходят — только list + `mapPullRequestToItem`.
 
 В элементе для UI ([`mapPullRequestToItem`](../ado-api.mjs)):
 
-- **`updatedAt`** = max(`lastGroupCommentAt`, `lastCommitAt`, `createdAt`) — для **сортировки** и метаданных;
+- **`updatedAt`** = max(`lastGroupCommentAt`, `lastCommitAt`, `closedAt`, `createdAt`) — для **сортировки** и метаданных (на My PRs без enrichment commit-полей обычно = `createdAt` / `closedAt`);
 - **`createdAt`** = дата создания PR;
-- **`lastCommitAt`**, **`lastGroupCommentAt`** — ISO-даты последнего пуша source и последнего комментария участника группы; попадают в элемент UI и используются для **рабочего времени** (см. ниже).
+- **`closedAt`** = дата закрытия (`closedDate`), если есть;
+- **`status`** — `active` / `abandoned` / `completed` / `unknown`;
+- **`lastCommitAt`**, **`lastGroupCommentAt`** — ISO-даты (в основном на Review; для рабочего времени);
+- **`targetBranch`** — целевая ветка (на My PRs);
+- **`blockingReasons`** — проблемы required Policies (см. выше);
+- **`conflictText`** — при конфликтах слияния (иначе поле отсутствует).
 
 ## Состояние в `storage` (ключ `prState`)
 
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
-- `items` — массив элементов для popup: `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`;
-- `count` — длина `items`;
+- `items` — массив элементов вкладки **Review**: `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons`, при конфликтах слияния — `conflictText`;
+- `count` — длина `items` (именно он влияет на badge toolbar и уведомления о новых PR);
+- `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
+- `myCount` — длина `myItems` (только активные; Complete в storage не кэшируются);
 - `matchedSectionTitle` — служебное поле фильтра (заголовок секции совпадения, если используется);
 - `lastCheckedAt` — ISO-время последней попытки обновления;
 - `lastSuccessAt` — ISO-время последнего **успешного** обновления;
 - `lastTrigger` — откуда вызвано обновление (`install`, `startup`, `alarm`, `manual`, `config-change`, `service-worker-load`, …);
 - `lastError` — текст ошибки или `null`;
-- `previousItemIds` — id из последнего успешного списка — для детекта **новых** PR и показа уведомлений.
+- `previousItemIds` — id из последнего успешного списка **Review** — для детекта **новых** PR и показа уведомлений.
 
-При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
+При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` / `myItems` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
 
 ## Рабочее время и срочность
 
@@ -190,18 +293,42 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 ## Popup ([`popup.mjs`](../popup.mjs), [`popup.css`](../popup.css))
 
 - Ширина документа: **600px**.
-- Верх: заголовок, строка «Последняя проверка», кнопка обновления, **счётчик** с числом PR (**серый** badge; скрывается при ошибке).
-- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой список — текст про reviewer-группы и личные назначения.
+- Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (**серый** badge; скрывается при ошибке). На **Review** — `count`, на **My PRs** — `myCount` (только активные). Отступ от заголовка до вкладок — **16px**.
+- Вкладки **Review** / **My PRs** (выбор хранится в `chrome.storage.session` на сессию браузера).
+- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы; пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
 - Низ: **футер** (сетка 3 колонки) — слева ссылка **GitHub**, по центру (если `prUpdateState.hasUpdate`) чип **«Новая версия — X.Y»**, справа **«Настройки подключения»** (`chrome.runtime.openOptionsPage()`).
 - Высота колонки попапа ограничивается CSS-переменной **`--popup-max-height`**, выставляемой скриптом как **половина `screen.availHeight`** (fallback `innerHeight`), плюс слушатель `resize`.
 
-Карточка PR:
+Карточка PR (**Review**):
 
 - клик по заголовку открывает PR в новой вкладке и закрывает popup;
 - под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если новых пушей после последнего комментария группы нет — текст **«Нет обновлений»** (без цветного чипа);
 - фрагмент времени — **чип** при **> 6 / > 8 / > 16** рабочих ч (жёлтый / оранжевый / красный); пороги — [`working-time.mjs`](../working-time.mjs);
 - при наличии описания — иконка раскрывает **панель под карточкой** с **упрощённым markdown** (заголовки **h1–h6**, списки, ссылки, код, жирный/курсив, картинки по `http(s)`; разбор скобок в URL картинок с балансом `()`);
+- **Policies** — розовый бейдж с числом замечаний (см. раздел «Policies»);
+- **конфликты** — бейдж **«конфликт»** (см. раздел «Конфликты слияния»);
 - для PR с текстом описания, совпадающим с эвристикой «тех ПР» — бейдж **ТЕХ ПР** и кнопка **Approve** (отправка сообщения в background).
+
+Карточка PR (**My PRs**, активные):
+
+- клик по заголовку — как в Review;
+- под заголовком: целевая ветка (`→ master`) и дата создания;
+- **Policies** — список под карточкой (см. раздел «Policies»);
+- **конфликты** — бейдж в строке метаданных (см. раздел «Конфликты слияния»);
+- описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются.
+
+Карточка PR (**My PRs**, Complete):
+
+- ниже всех активных; бейдж **Complete**; дата закрытия; без Policies и конфликтов;
+- догрузка по 10, кнопка **«Показать ещё»** (см. «My PRs → Завершённые PR»).
+
+Сообщения popup → background:
+
+| Тип | Назначение |
+|-----|------------|
+| `manual-refresh` | Ручное обновление активных списков Review/My PRs |
+| `approve-pull-request` | Approve (vote 10) |
+| `load-my-completed-pull-requests` | Страница Complete для вкладки My PRs (`skip`, `top`) |
 
 ## Approve
 
@@ -244,4 +371,4 @@ node --check popup.mjs
 node --check working-time.mjs
 ```
 
-Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.8**).
+Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.11**).
