@@ -452,6 +452,11 @@ function createItemElement(item, options = {}) {
   listItem.className = "popup__item";
   const isCompleted = mode === TAB_MY && item?.status === "completed";
   const isTechPR = mode === TAB_REVIEW && isTechPullRequest(item.description);
+  const hasNoUpdates = mode === TAB_REVIEW && !hasUpdatesAfterLastGroupComment(item);
+
+  if (hasNoUpdates) {
+    listItem.classList.add("popup__item--no-updates");
+  }
 
   const timeUrgency = mode === TAB_REVIEW
     ? getItemWorkingTimeUrgency(item, currentState.lastCheckedAt)
