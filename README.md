@@ -86,7 +86,7 @@
 
 - Для активных PR на **Review** и **My PRs** запрашиваются policy evaluations (как блок Policies в ADO).
 - Красные пункты **Required** → `blockingReasons`; красные **Optional** → `optionalPolicyReasons`.
-- **Review:** розовый бейдж с числом замечаний → раскрываемый список (Required, затем Optional).
+- **Review:** розовый бейдж с числом замечаний (или **Votes check**, если активны только правила ожидания голосов) → раскрываемый список (Required, затем Optional).
 - **My PRs:** под карточкой список Required или **«Готов к Complete»**, плюс блок Optional при наличии; либо ошибка загрузки политик.
 - У Complete на My PRs политики не показываются.
 

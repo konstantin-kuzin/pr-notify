@@ -721,22 +721,27 @@ function createPolicyReasonsBlock(required, optional) {
   return wrap;
 }
 
-/** Набор причин, при котором бейдж показывает «Votes check» вместо числа. */
-const VOTES_CHECK_ONLY_REASONS = new Set([
-  "0 of 1 reviewers approved",
-  "Votes check",
-  "Required reviewers have not approved",
-]);
+/** Наборы Required-причин, при которых бейдж показывает «Votes check» вместо числа. */
+const VOTES_CHECK_ONLY_REASON_SETS = [
+  new Set([
+    "0 of 1 reviewers approved",
+    "Votes check",
+    "Required reviewers have not approved",
+  ]),
+  new Set(["Votes check", "Required reviewers have not approved"]),
+];
 
 /**
  * @param {string[]} reasons
  */
 function isVotesCheckOnlyReasons(reasons) {
-  if (reasons.length !== VOTES_CHECK_ONLY_REASONS.size) {
-    return false;
-  }
+  return VOTES_CHECK_ONLY_REASON_SETS.some((allowed) => {
+    if (reasons.length !== allowed.size) {
+      return false;
+    }
 
-  return reasons.every((reason) => VOTES_CHECK_ONLY_REASONS.has(reason));
+    return reasons.every((reason) => allowed.has(reason));
+  });
 }
 
 /**
