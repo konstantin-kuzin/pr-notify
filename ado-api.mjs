@@ -2128,14 +2128,47 @@ export function getExtensionReviewerContext(config, myId) {
   };
 }
 
+function reviewerHasNoVote(reviewer) {
+  return Number(reviewer?.vote ?? 0) === 0;
+}
+
+/**
+ * Нужна ли реакция на Review.
+ * Если на PR есть выбранные reviewer-группы — решают только их голоса:
+ * апрув группы скрывает карточку даже при личном `vote === 0`
+ * (в ADO участника часто добавляют optional-ревьюером).
+ * Иначе смотрим только голос текущего пользователя.
+ *
+ * @param {Array<any>} reviewers
+ * @param {string} currentUserId
+ * @param {string[]} selectedGroupIds
+ */
+function hasPendingAllowedReviewerVote(reviewers, currentUserId, selectedGroupIds) {
+  const groupIdSet = new Set(selectedGroupIds);
+  const selectedGroupReviewers = groupIdSet.size === 0
+    ? []
+    : reviewers.filter((reviewer) => groupIdSet.has(String(reviewer?.id ?? "")));
+
+  if (selectedGroupReviewers.length > 0) {
+    return selectedGroupReviewers.some(reviewerHasNoVote);
+  }
+
+  return reviewers.some(
+    (reviewer) => (
+      String(reviewer?.id ?? "") === String(currentUserId)
+      && reviewerHasNoVote(reviewer)
+    ),
+  );
+}
+
 /**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
  * @param {string} myId
  */
 export async function filterPullRequestsForExtension(config, pullRequests, myId) {
-  const { allowedReviewerIds, matchedSectionTitle } = getExtensionReviewerContext(config, myId);
-  const allowedReviewerIdsSet = new Set(allowedReviewerIds);
+  const { matchedSectionTitle } = getExtensionReviewerContext(config, myId);
+  const selectedGroupIds = normalizeConfiguredGroupIds(config);
   const filtered = pullRequests.filter((pullRequest) => {
     if (!isVisiblePullRequestForExtension(pullRequest)) {
       return false;
@@ -2143,12 +2176,7 @@ export async function filterPullRequestsForExtension(config, pullRequests, myId)
 
     const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
 
-    return reviewers.some(
-      (reviewer) => (
-        allowedReviewerIdsSet.has(String(reviewer?.id ?? ""))
-        && Number(reviewer?.vote ?? 0) === 0
-      ),
-    );
+    return hasPendingAllowedReviewerVote(reviewers, myId, selectedGroupIds);
   });
 
   return { filtered, matchedSectionTitle };

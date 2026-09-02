@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PR Notify",
   "description": "Показывает pull requests на ревью и ваши собственные PR в Azure DevOps",
-  "version": "2.14",
+  "version": "2.15",
   "minimum_chrome_version": "116",
   "permissions": [
     "alarms",
