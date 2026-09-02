@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Инструкции для ИИ-агентов, работающих с репозиторием **PR Notify** — Chrome-расширением (Manifest V3), которое показывает pull request'ы в Azure DevOps: на вкладке **Review** — PR на ревью, на вкладке **My PRs** — собственные активные и Complete PR; в списках — Policies и конфликты слияния.
+Инструкции для ИИ-агентов, работающих с репозиторием **PR Notify** — Chrome-расширением (Manifest V3), которое показывает pull request'ы в Azure DevOps: на вкладке **Review** — PR на ревью и ниже уже одобренные (APPROVED), на вкладке **My PRs** — собственные активные и Complete PR; в списках — Policies и конфликты слияния.
 
 Подробное описание поведения и полей данных: [`docs/documentation.md`](docs/documentation.md). Краткий обзор для людей: [`README.md`](README.md).
 
@@ -69,13 +69,13 @@ done
 ### Ключи `chrome.storage.local`
 
 - **`adoConfig`** — подключение к ADO (см. [`ado-config.mjs`](ado-config.mjs)).
-- **`prState`** — списки PR (Review: `items` / My PRs: `myItems`), ошибки, метки времени обновления.
+- **`prState`** — списки PR (Review: `items` и `approvedItems` / My PRs: `myItems`), ошибки, метки времени обновления.
 - **`prUpdateState`** — результат проверки новой версии на GitHub.
 
 ### Поток данных
 
 ```
-background.mjs → ado-api.mjs (REST: review + my/policies; Complete на My PRs PRs — по запросу) → prState в storage → popup.mjs (вкладки Review/My PRs)
+background.mjs → ado-api.mjs (REST: review pending+approved + my/policies; Complete на My PRs — по запросу) → prState в storage → popup.mjs (вкладки Review/My PRs)
 options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 ```
 
@@ -92,7 +92,7 @@ options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 
 ## Важная бизнес-логика (куда смотреть)
 
-- **Отбор PR:** [`ado-api.mjs`](ado-api.mjs) — `filterPullRequestsForExtension`, `getExtensionReviewerContext`, `filterMyPullRequests`, `listCompletedPullRequestsByCreator`.
+- **Отбор PR:** [`ado-api.mjs`](ado-api.mjs) — `filterPullRequestsForExtension` (ожидающие + одобренные), `getExtensionReviewerContext`, `filterMyPullRequests`, `listCompletedPullRequestsByCreator`.
 - **Обогащение PR** (commits, group comments, Policies, conflicts, `updatedAt`): `attachPullRequestLastCommitTimes`, `attachPullRequestBlockingReasons`, `attachPullRequestConflictInfo`, `mapPullRequestToItem`.
 - **Рабочее время и срочность:** [`working-time.mjs`](working-time.mjs) — пороги 6 / 8 / 16 рабочих часов; точка отсчёта от `lastCommitAt` с учётом комментариев группы; сортировка «ожидающие ревью» выше.
 - **Approve (vote: 10):** сообщение `approve-pull-request` в [`background.mjs`](background.mjs), REST в `ado-api.mjs`.

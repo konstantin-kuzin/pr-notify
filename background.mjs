@@ -39,6 +39,7 @@ const APPROVE_REFRESH_INTERVAL_MS = 2_000;
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  approvedItems: [],
   myItems: [],
   myCount: 0,
   lastCheckedAt: null,
@@ -196,7 +197,7 @@ async function refreshPullRequests(trigger) {
       listActivePullRequestsForAllowedReviewers(config, allowedReviewerIds),
       listActivePullRequestsByCreator(config, myCreatorId),
     ]);
-    const { filtered } = await filterPullRequestsForExtension(
+    const { filtered, approved } = await filterPullRequestsForExtension(
       config,
       rawPullRequests,
       identity.id,
@@ -222,6 +223,11 @@ async function refreshPullRequests(trigger) {
         .map((pr) => mapPullRequestToItem(pr, config))
         .filter(Boolean),
     );
+    const approvedItems = sortMyPullRequestsNewestFirst(
+      approved
+        .map((pr) => mapPullRequestToItem(pr, config))
+        .filter(Boolean),
+    );
     const myItems = sortMyPullRequestsNewestFirst(
       myWithConflicts
         .map((pr) => mapPullRequestToItem(pr, config))
@@ -231,6 +237,7 @@ async function refreshPullRequests(trigger) {
     const nextState = {
       items,
       count: items.length,
+      approvedItems,
       myItems,
       myCount: myItems.length,
       lastCheckedAt: checkedAt,

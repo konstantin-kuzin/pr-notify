@@ -6,7 +6,7 @@
 
 Расширение **PR Notify** для **Google Chrome** показывает pull request’ы в **Git-репозитории Azure DevOps** в popup с двумя вкладками:
 
-- вкладка **Review** — активные PR, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы);
+- вкладка **Review** — активные PR, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы); ниже — уже одобренные (**APPROVED**);
 - вкладка **My PRs** — PR, **созданные** текущим пользователем: сначала **активные**, ниже — завершённые (**Complete**), с догрузкой по 10.
 
 В списках дополнительно:
@@ -87,9 +87,10 @@
 4. Для **каждого** id из этого набора выполняется запрос списка активных PR с фильтром «этот ревьюер в PR» (параллельно, затем дедупликация по `pullRequestId`).
 5. Дополнительно в коде отбрасываются черновики (`isDraft`) и неактивные статусы.
 6. Остаются PR, по которым ещё нет реакции «своих» ревьюеров:
-   - если на PR есть хотя бы одна **выбранная reviewer-группа** — смотрим только её `vote`: карточка скрывается, когда все такие группы уже проголосовали (в т.ч. апрув «via» участника). Личный `vote === 0` текущего пользователя **не** удерживает PR в списке;
+   - если на PR есть хотя бы одна **выбранная reviewer-группа** — смотрим только её `vote`: карточка уходит из ожидающих, когда все такие группы уже проголосовали (в т.ч. апрув «via» участника). Личный `vote === 0` текущего пользователя **не** удерживает PR в списке ожидающих;
    - иначе (групп на PR нет или в настройках группы не выбраны) — остаётся PR, где **вы** числитесь ревьюером с **`vote === 0`**.
-7. Результат сортируется в [`sortPullRequestsOldestFirst`](../working-time.mjs): сначала PR, **ожидающие ревью** (есть новые пуши после последнего комментария группы или комментария ещё не было) — **старые выше** по **`updatedAt`**; PR **без новых обновлений** после комментария группы — **в конце** списка (см. раздел «Рабочее время и срочность»).
+7. Результат сортируется в [`sortPullRequestsOldestFirst`](../working-time.mjs): сначала PR, **ожидающие ревью** (есть новые пуши после последнего комментария группы или комментария ещё не было) — **старые выше** по **`updatedAt`**; PR **без новых обновлений** после комментария группы — **в конце** списка, под заголовком **NO CHANGES** (см. раздел «Рабочее время и срочность»).
+8. PR, которые уже одобрены «своими» ревьюерами, **не скрываются**: они пишутся в `prState.approvedItems` и показываются **ниже** ожидающих и NO CHANGES, под заголовком **APPROVED**. Критерий: `vote >= 5` (Approved / Approved with suggestions). Если на PR есть выбранные reviewer-группы — все такие группы уже одобрили; иначе одобрили **вы**. Политики, конфликты и last-commit enrichment для этой группы **не** запрашиваются. Сортировка: **новые выше** по `createdAt`. Reject / Waiting for author в APPROVED **не** попадают.
 
 ### My PRs PRs (мои PR)
 
@@ -120,7 +121,7 @@
 
 ## Policies (Required + Optional)
 
-Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **активных** PR **обеих** вкладок (Review и My PRs).
+Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **ожидающих** PR вкладки Review и **активных** PR вкладки My PRs. Одобренные (APPROVED) не обогащаются политиками.
 
 ### API
 
@@ -181,15 +182,15 @@
 
 Порядок в [`refreshPullRequests`](../background.mjs):
 
-1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для отфильтрованных PR на ревью:
+1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для **ожидающих** PR на ревью (`filtered`, не `approved`):
    - **`GET .../pullrequests/{id}?includeCommits=true`**: полное `description`; **`lastCommitAt`** из push/commit (кэш);
    - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system).
 
-2. **Review и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
+2. **Review (ожидающие) и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
 
-3. **Review и My PRs (активные)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
+3. **Review (ожидающие) и My PRs (активные)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
 
-Завершённые PR на My PRs (Complete) этим пайплайном **не** проходят — только list + `mapPullRequestToItem`.
+Завершённые PR на My PRs (Complete) и одобренные PR на Review (APPROVED) этим пайплайном **не** проходят — только list + `mapPullRequestToItem`.
 
 В элементе для UI ([`mapPullRequestToItem`](../ado-api.mjs)):
 
@@ -207,8 +208,9 @@
 
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
-- `items` — массив элементов вкладки **Review**: `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
-- `count` — длина `items` (именно он влияет на badge toolbar и уведомления о новых PR);
+- `items` — массив элементов вкладки **Review** (ожидающие ревью): `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
+- `count` — длина `items` (именно он влияет на badge toolbar, счётчик popup и уведомления о новых PR; одобренные не входят);
+- `approvedItems` — массив уже одобренных PR вкладки **Review** (без политик, конфликтов и last-commit enrichment); в badge и уведомления **не** входят;
 - `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
 - `myCount` — длина `myItems` (только активные; Complete в storage не кэшируются);
 - `matchedSectionTitle` — служебное поле фильтра (заголовок секции совпадения, если используется);
@@ -218,7 +220,7 @@
 - `lastError` — текст ошибки или `null`;
 - `previousItemIds` — id из последнего успешного списка **Review** — для детекта **новых** PR и показа уведомлений.
 
-При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` / `myItems` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
+При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` / `approvedItems` / `myItems` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
 
 ## Рабочее время и срочность
 
@@ -255,7 +257,7 @@ PR без ожидания ревью **не участвуют** в расчё�
 
 ### Сортировка списка
 
-[`sortPullRequestsOldestFirst`](../working-time.mjs): PR с ожиданием ревью — выше, внутри группы **старые по `updatedAt` выше**; PR без новых обновлений после комментария группы — **в конце**. Сортировка выполняется в фоне при сохранении `prState` и повторно в popup при отрисовке.
+[`sortPullRequestsOldestFirst`](../working-time.mjs): PR с ожиданием ревью — выше, внутри группы **старые по `updatedAt` выше**; PR без новых обновлений после комментария группы — **в конце**, в popup под заголовком **NO CHANGES**. Сортировка выполняется в фоне при сохранении `prState` и повторно в popup при отрисовке.
 
 ### Иконка и badge на панели Chrome
 
@@ -300,14 +302,14 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - Ширина документа: **600px**.
 - Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (**серый** badge; скрывается при ошибке). На **Review** — `count`, на **My PRs** — `myCount` (только активные). Отступ от заголовка до вкладок — **16px**.
 - Вкладки **Review** / **My PRs** (выбор хранится в `chrome.storage.session` на сессию браузера).
-- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы; пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
+- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы (если нет ни ожидающих, ни одобренных); пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
 - Низ: **футер** (сетка 3 колонки) — слева ссылка **GitHub**, по центру (если `prUpdateState.hasUpdate`) чип **«Новая версия — X.Y»**, справа **«Настройки подключения»** (`chrome.runtime.openOptionsPage()`).
 - Высота колонки попапа ограничивается CSS-переменной **`--popup-max-height`**, выставляемой скриптом как **половина `screen.availHeight`** (fallback `innerHeight`), плюс слушатель `resize`.
 
 Карточка PR (**Review**):
 
 - клик по заголовку открывает PR в новой вкладке и закрывает popup;
-- если новых пушей после последнего комментария группы нет — вся карточка с **opacity 0.8** (`popup__item--no-updates`), заголовок с обычным начертанием;
+- если новых пушей после последнего комментария группы нет — карточка в группе **NO CHANGES**, стиль неактивных (`popup__item--no-updates`);
 - под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если новых пушей после комментария группы нет — текст **«Нет обновлений»** (без цветного чипа);
 - фрагмент времени — **чип** при **> 6 / > 8 / > 16** рабочих ч (жёлтый / оранжевый / красный); пороги — [`working-time.mjs`](../working-time.mjs);
 - иконка **Storybook** (слева от иконки описания) открывает `https://storybook.s1.ksc-web.avp.ru/hexa-ui/<id PR>/` в новой вкладке и закрывает popup; **скрывается**, если есть конфликты слияния или в Policies есть `[OSMP] Storybook Hexa UI deploy for Review expired`;
@@ -315,6 +317,13 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - **Policies** — розовый бейдж с числом замечаний или **Votes check** (см. раздел «Policies»);
 - **конфликты** — бейдж **«конфликт»** (см. раздел «Конфликты слияния»);
 - для PR с текстом описания, совпадающим с эвристикой «тех ПР» — бейдж **ТЕХ ПР** и кнопка **Approve** (отправка сообщения в background).
+
+Карточка PR (**Review**, одобренные):
+
+- ниже групп ожидающих и **NO CHANGES**, под заголовком **APPROVED**;
+- стиль как у неактивных (`popup__item--no-updates`); в метаданных — **«Нет обновлений»**;
+- без срочности, Policies, конфликтов, бейджа **ТЕХ ПР** и кнопки **Approve**;
+- не входят в счётчик вкладки и badge toolbar.
 
 Карточка PR (**My PRs**, активные):
 
@@ -379,4 +388,4 @@ node --check popup.mjs
 node --check working-time.mjs
 ```
 
-Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.15**).
+Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.16**).

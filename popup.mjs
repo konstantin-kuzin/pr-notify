@@ -22,6 +22,7 @@ const STORYBOOK_EXPIRED_REASON_RE = /\[OSMP\]\s*Storybook Hexa UI deploy for Rev
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  approvedItems: [],
   myItems: [],
   myCount: 0,
   lastCheckedAt: null,
@@ -156,7 +157,12 @@ function render() {
     ? (currentState.myCount ?? visibleItems.length)
     : (currentState.count ?? visibleItems.length);
   const completedItems = isMyTab ? myCompletedItems : [];
-  const hasListContent = visibleItems.length > 0 || completedItems.length > 0;
+  const approvedItems = isMyTab
+    ? []
+    : (Array.isArray(currentState.approvedItems) ? currentState.approvedItems : []);
+  const hasListContent = visibleItems.length > 0
+    || completedItems.length > 0
+    || approvedItems.length > 0;
   const waitingCompleted = isMyTab
     && !hasListContent
     && (isLoadingMyCompleted || !myCompletedLoaded);
@@ -225,11 +231,42 @@ function render() {
     ? visibleItems
     : sortPullRequestsOldestFirst(visibleItems);
 
-  for (const item of orderedItems) {
-    itemsList.append(createItemElement(item, { mode: activeTab }));
-  }
+  if (isMyTab) {
+    for (const item of orderedItems) {
+      itemsList.append(createItemElement(item, { mode: TAB_MY }));
+    }
+  } else {
+    const waitingItems = [];
+    const noChangesItems = [];
 
-  if (!isMyTab) {
+    for (const item of orderedItems) {
+      if (hasUpdatesAfterLastGroupComment(item)) {
+        waitingItems.push(item);
+      } else {
+        noChangesItems.push(item);
+      }
+    }
+
+    for (const item of waitingItems) {
+      itemsList.append(createItemElement(item, { mode: TAB_REVIEW }));
+    }
+
+    if (noChangesItems.length > 0) {
+      itemsList.append(createGroupHeading("NO CHANGES"));
+
+      for (const item of noChangesItems) {
+        itemsList.append(createItemElement(item, { mode: TAB_REVIEW }));
+      }
+    }
+
+    if (approvedItems.length > 0) {
+      itemsList.append(createGroupHeading("APPROVED"));
+
+      for (const item of approvedItems) {
+        itemsList.append(createItemElement(item, { mode: TAB_REVIEW, approved: true }));
+      }
+    }
+
     return;
   }
 
@@ -443,22 +480,38 @@ async function refreshState({ clearTransientMessage, errorPrefix }) {
 }
 
 /**
+ * @param {string} text
+ */
+function createGroupHeading(text) {
+  const row = document.createElement("li");
+  row.className = "popup__group-heading";
+
+  const heading = document.createElement("h2");
+  heading.className = "popup__group-heading-text";
+  heading.textContent = text;
+  row.append(heading);
+  return row;
+}
+
+/**
  * @param {any} item
- * @param {{ mode?: "review" | "my" }} [options]
+ * @param {{ mode?: "review" | "my", approved?: boolean }} [options]
  */
 function createItemElement(item, options = {}) {
   const mode = options.mode === TAB_MY ? TAB_MY : TAB_REVIEW;
+  const isApproved = mode === TAB_REVIEW && options.approved === true;
   const listItem = document.createElement("li");
   listItem.className = "popup__item";
   const isCompleted = mode === TAB_MY && item?.status === "completed";
-  const isTechPR = mode === TAB_REVIEW && isTechPullRequest(item.description);
-  const hasNoUpdates = mode === TAB_REVIEW && !hasUpdatesAfterLastGroupComment(item);
+  const isTechPR = !isApproved && mode === TAB_REVIEW && isTechPullRequest(item.description);
+  const hasNoUpdates = isApproved
+    || (mode === TAB_REVIEW && !hasUpdatesAfterLastGroupComment(item));
 
   if (hasNoUpdates) {
     listItem.classList.add("popup__item--no-updates");
   }
 
-  const timeUrgency = mode === TAB_REVIEW
+  const timeUrgency = !isApproved && mode === TAB_REVIEW
     ? getItemWorkingTimeUrgency(item, currentState.lastCheckedAt)
     : null;
 
@@ -498,7 +551,9 @@ function createItemElement(item, options = {}) {
   if (mode === TAB_MY) {
     fillMyMetaParagraph(author, item);
   } else {
-    fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency);
+    fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency, {
+      hasNoUpdates,
+    });
   }
 
   authorRow.append(author);
@@ -518,7 +573,7 @@ function createItemElement(item, options = {}) {
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
   let blockersUi = null;
 
-  if (mode === TAB_REVIEW) {
+  if (mode === TAB_REVIEW && !isApproved) {
     blockersUi = createBlockingReasonsToggle(item);
     if (blockersUi) {
       authorRow.append(blockersUi.icon);
@@ -526,7 +581,7 @@ function createItemElement(item, options = {}) {
   }
 
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
-  const conflictUi = isCompleted ? null : createConflictToggle(item);
+  const conflictUi = isCompleted || isApproved ? null : createConflictToggle(item);
   if (conflictUi) {
     authorRow.append(conflictUi.icon);
   }
@@ -1129,10 +1184,12 @@ function formatLastCheckedAt(timestamp) {
 /**
  * @param {HTMLParagraphElement} el
  * @param {"yellow"|"orange"|"red"|null} timeUrgency
+ * @param {{ hasNoUpdates?: boolean }} [options]
  */
-function fillAuthorMetaParagraph(el, item, checkedAt, timeUrgency) {
+function fillAuthorMetaParagraph(el, item, checkedAt, timeUrgency, options = {}) {
   const authorName = item.author || "Автор не определён";
-  const hasNoUpdates = !hasUpdatesAfterLastGroupComment(item);
+  const hasNoUpdates = options.hasNoUpdates === true
+    || !hasUpdatesAfterLastGroupComment(item);
   const relativeTime = hasNoUpdates
     ? null
     : formatElapsedSince(getItemWorkingTimeFrom(item), checkedAt);

@@ -2132,10 +2132,32 @@ function reviewerHasNoVote(reviewer) {
   return Number(reviewer?.vote ?? 0) === 0;
 }
 
+/** ADO: 10 — Approved, 5 — Approved with suggestions. */
+function reviewerHasApprovedVote(reviewer) {
+  return Number(reviewer?.vote ?? 0) >= 5;
+}
+
+/**
+ * Выбранные reviewer-группы на PR, иначе пустой массив.
+ *
+ * @param {Array<any>} reviewers
+ * @param {string[]} selectedGroupIds
+ * @returns {Array<any>}
+ */
+function getSelectedGroupReviewers(reviewers, selectedGroupIds) {
+  const groupIdSet = new Set(selectedGroupIds);
+
+  if (groupIdSet.size === 0) {
+    return [];
+  }
+
+  return reviewers.filter((reviewer) => groupIdSet.has(String(reviewer?.id ?? "")));
+}
+
 /**
  * Нужна ли реакция на Review.
  * Если на PR есть выбранные reviewer-группы — решают только их голоса:
- * апрув группы скрывает карточку даже при личном `vote === 0`
+ * апрув группы убирает карточку из ожидающих даже при личном `vote === 0`
  * (в ADO участника часто добавляют optional-ревьюером).
  * Иначе смотрим только голос текущего пользователя.
  *
@@ -2144,10 +2166,7 @@ function reviewerHasNoVote(reviewer) {
  * @param {string[]} selectedGroupIds
  */
 function hasPendingAllowedReviewerVote(reviewers, currentUserId, selectedGroupIds) {
-  const groupIdSet = new Set(selectedGroupIds);
-  const selectedGroupReviewers = groupIdSet.size === 0
-    ? []
-    : reviewers.filter((reviewer) => groupIdSet.has(String(reviewer?.id ?? "")));
+  const selectedGroupReviewers = getSelectedGroupReviewers(reviewers, selectedGroupIds);
 
   if (selectedGroupReviewers.length > 0) {
     return selectedGroupReviewers.some(reviewerHasNoVote);
@@ -2162,6 +2181,29 @@ function hasPendingAllowedReviewerVote(reviewers, currentUserId, selectedGroupId
 }
 
 /**
+ * Уже одобрено «своими» ревьюерами: все выбранные группы на PR с vote >= 5,
+ * иначе личный апрув текущего пользователя.
+ *
+ * @param {Array<any>} reviewers
+ * @param {string} currentUserId
+ * @param {string[]} selectedGroupIds
+ */
+function hasApprovedAllowedReviewerVote(reviewers, currentUserId, selectedGroupIds) {
+  const selectedGroupReviewers = getSelectedGroupReviewers(reviewers, selectedGroupIds);
+
+  if (selectedGroupReviewers.length > 0) {
+    return selectedGroupReviewers.every(reviewerHasApprovedVote);
+  }
+
+  return reviewers.some(
+    (reviewer) => (
+      String(reviewer?.id ?? "") === String(currentUserId)
+      && reviewerHasApprovedVote(reviewer)
+    ),
+  );
+}
+
+/**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
  * @param {string} myId
@@ -2169,17 +2211,27 @@ function hasPendingAllowedReviewerVote(reviewers, currentUserId, selectedGroupId
 export async function filterPullRequestsForExtension(config, pullRequests, myId) {
   const { matchedSectionTitle } = getExtensionReviewerContext(config, myId);
   const selectedGroupIds = normalizeConfiguredGroupIds(config);
-  const filtered = pullRequests.filter((pullRequest) => {
+  const filtered = [];
+  const approved = [];
+
+  for (const pullRequest of pullRequests) {
     if (!isVisiblePullRequestForExtension(pullRequest)) {
-      return false;
+      continue;
     }
 
     const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
 
-    return hasPendingAllowedReviewerVote(reviewers, myId, selectedGroupIds);
-  });
+    if (hasPendingAllowedReviewerVote(reviewers, myId, selectedGroupIds)) {
+      filtered.push(pullRequest);
+      continue;
+    }
 
-  return { filtered, matchedSectionTitle };
+    if (hasApprovedAllowedReviewerVote(reviewers, myId, selectedGroupIds)) {
+      approved.push(pullRequest);
+    }
+  }
+
+  return { filtered, approved, matchedSectionTitle };
 }
 
 function isVisiblePullRequestForExtension(pullRequest) {
