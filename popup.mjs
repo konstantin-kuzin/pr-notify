@@ -1,7 +1,9 @@
 import {
   BADGE_STYLES,
+  countWaitingPullRequests,
   getItemWorkingTimeFrom,
   getItemWorkingTimeUrgency,
+  getToolbarBadgeStyleKey,
   getWorkingElapsedMinutes,
   hasUpdatesAfterLastGroupComment,
   sortPullRequestsOldestFirst,
@@ -12,6 +14,7 @@ const UPDATE_STATE_KEY = "prUpdateState";
 const ADO_CONFIG_KEY = "adoConfig";
 const ACTIVE_TAB_KEY = "popupActiveTab";
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
+const SYNC_BADGE_MESSAGE_TYPE = "sync-badge";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
 const MY_COMPLETED_PAGE_SIZE = 20;
@@ -19,6 +22,28 @@ const TAB_REVIEW = "review";
 const TAB_MY = "my";
 const STORYBOOK_BASE_URL = "https://storybook.s1.ksc-web.avp.ru/hexa-ui";
 const STORYBOOK_EXPIRED_REASON_RE = /\[OSMP\]\s*Storybook Hexa UI deploy for Review expired/i;
+const TOOLBAR_ICON_PATHS = {
+  default: {
+    16: "icons/icon-16.png",
+    32: "icons/icon-32.png",
+  },
+  green: {
+    16: "icons/icon-16-green.png",
+    32: "icons/icon-32-green.png",
+  },
+  orange: {
+    16: "icons/icon-16-orange.png",
+    32: "icons/icon-32-orange.png",
+  },
+  red: {
+    16: "icons/icon-16-red.png",
+    32: "icons/icon-32-red.png",
+  },
+  error: {
+    16: "icons/icon-16-error.png",
+    32: "icons/icon-32-error.png",
+  },
+};
 const DEFAULT_STATE = {
   items: [],
   count: 0,
@@ -82,6 +107,7 @@ async function init() {
   hasConfiguredGroups = await loadHasConfiguredGroups();
   activeTab = await loadActiveTab();
   render();
+  void chrome.runtime.sendMessage({ type: SYNC_BADGE_MESSAGE_TYPE }).catch(() => {});
   refreshButton.addEventListener("click", () => {
     void refreshNow();
   });
@@ -147,6 +173,43 @@ function normalizeUpdateState(rawState) {
   };
 }
 
+async function syncToolbarBadge(state) {
+  const hasError = !!state?.lastError;
+  const items = Array.isArray(state?.items) ? state.items : [];
+  const count = hasError ? 0 : countWaitingPullRequests(items);
+
+  if (hasError) {
+    await chrome.action.setIcon({ path: TOOLBAR_ICON_PATHS.error });
+    await chrome.action.setBadgeText({ text: "" });
+  } else {
+    const styleKey = getToolbarBadgeStyleKey(count, items, state?.lastCheckedAt);
+    const style = BADGE_STYLES[styleKey] ?? BADGE_STYLES.gray;
+
+    await chrome.action.setIcon({ path: TOOLBAR_ICON_PATHS[styleKey] ?? TOOLBAR_ICON_PATHS.default });
+    await chrome.action.setBadgeBackgroundColor({ color: style.background });
+    await chrome.action.setBadgeText({ text: String(count) });
+
+    if (chrome.action.setBadgeTextColor) {
+      await chrome.action.setBadgeTextColor({ color: style.text });
+    }
+  }
+
+  if (hasError || state.count === count) {
+    return;
+  }
+
+  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const current = stored[STORAGE_KEY];
+
+  if (!current || current.count === count) {
+    return;
+  }
+
+  await chrome.storage.local.set({
+    [STORAGE_KEY]: { ...current, count },
+  });
+}
+
 function render() {
   const hasError = !!currentState.lastError;
   const isMyTab = activeTab === TAB_MY;
@@ -155,7 +218,8 @@ function render() {
     : (Array.isArray(currentState.items) ? currentState.items : []);
   const visibleCount = isMyTab
     ? (currentState.myCount ?? visibleItems.length)
-    : (currentState.count ?? visibleItems.length);
+    : countWaitingPullRequests(visibleItems);
+  void syncToolbarBadge(currentState);
   const completedItems = isMyTab ? myCompletedItems : [];
   const approvedItems = isMyTab
     ? []
@@ -178,7 +242,7 @@ function render() {
   } else {
     countBadge.classList.remove("hidden");
     countBadge.textContent = String(visibleCount ?? 0);
-    applyCountBadgeStyle("gray");
+    applyCountBadgeStyle((visibleCount ?? 0) <= 0 ? "green" : "gray");
   }
 
   lastUpdated.textContent = formatLastCheckedAt(currentState.lastCheckedAt);

@@ -209,7 +209,7 @@
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
 - `items` — массив элементов вкладки **Review** (ожидающие ревью): `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
-- `count` — длина `items` (именно он влияет на badge toolbar, счётчик popup и уведомления о новых PR; одобренные не входят);
+- `count` — число PR из `items`, **ожидающих ревью** (`hasUpdatesAfterLastGroupComment`); группа **NO CHANGES** и **APPROVED** не входят. Влияет на badge toolbar и счётчик popup на вкладке Review;
 - `approvedItems` — массив уже одобренных PR вкладки **Review** (без политик, конфликтов и last-commit enrichment); в badge и уведомления **не** входят;
 - `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
 - `myCount` — длина `myItems` (только активные; Complete в storage не кэшируются);
@@ -265,6 +265,7 @@ PR без ожидания ревью **не участвуют** в расчё�
 
 | Порог (рабочие ч) | Иконка toolbar | Badge (число) |
 |-------------------|----------------|---------------|
+| нет ожидающих (0) | green          | **0**, зелёный фон |
 | ≤ 6               | default        | серый фон     |
 | > 6               | default        | жёлтый фон    |
 | > 8               | orange         | оранжевый фон |
@@ -272,7 +273,7 @@ PR без ожидания ревью **не участвуют** в расчё�
 
 Жёлтый уровень (>6 ч) **не меняет** иконку toolbar — только **чип времени** в карточке PR и цвет badge.
 
-Счётчик в popup (`#count-badge`) всегда в **сером** стиле (`BADGE_STYLES.gray`), независимо от срочности.
+Счётчик в popup (`#count-badge`): при **0** — зелёный фон (`BADGE_STYLES.green`), иначе серый (`BADGE_STYLES.gray`), независимо от срочности.
 
 ## Состояние обновления расширения (ключ `prUpdateState`)
 
@@ -300,7 +301,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 ## Popup ([`popup.mjs`](../popup.mjs), [`popup.css`](../popup.css))
 
 - Ширина документа: **600px**.
-- Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (**серый** badge; скрывается при ошибке). На **Review** — `count`, на **My PRs** — `myCount` (только активные). Отступ от заголовка до вкладок — **16px**.
+- Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (при **0** — зелёный фон, иначе серый; скрывается при ошибке). На **Review** — только PR, ожидающие ревью (без **NO CHANGES** и **APPROVED**); на **My PRs** — `myCount` (только активные). Отступ от заголовка до вкладок — **16px**.
 - Вкладки **Review** / **My PRs** (выбор хранится в `chrome.storage.session` на сессию браузера).
 - Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы (если нет ни ожидающих, ни одобренных); пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
 - Низ: **футер** (сетка 3 колонки) — слева ссылка **GitHub**, по центру (если `prUpdateState.hasUpdate`) чип **«Новая версия — X.Y»**, справа **«Настройки подключения»** (`chrome.runtime.openOptionsPage()`).
@@ -309,7 +310,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 Карточка PR (**Review**):
 
 - клик по заголовку открывает PR в новой вкладке и закрывает popup;
-- если новых пушей после последнего комментария группы нет — карточка в группе **NO CHANGES**, стиль неактивных (`popup__item--no-updates`);
+- если новых пушей после последнего комментария группы нет — карточка в группе **NO CHANGES**, стиль неактивных (`popup__item--no-updates`); в счётчик вкладки и badge toolbar **не** входят;
 - под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если новых пушей после комментария группы нет — текст **«Нет обновлений»** (без цветного чипа);
 - фрагмент времени — **чип** при **> 6 / > 8 / > 16** рабочих ч (жёлтый / оранжевый / красный); пороги — [`working-time.mjs`](../working-time.mjs);
 - иконка **Storybook** (слева от иконки описания) открывает `https://storybook.s1.ksc-web.avp.ru/hexa-ui/<id PR>/` в новой вкладке и закрывает popup; **скрывается**, если есть конфликты слияния или в Policies есть `[OSMP] Storybook Hexa UI deploy for Review expired`;
@@ -368,7 +369,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 | `options.html` / `options.css` / `options.mjs` | UI настроек |
 | `popup.html` / `popup.css` / `popup.mjs` | UI списка |
 | `working-time.mjs` | Рабочие часы (МСК), точка отсчёта и ожидание ревью, пороги срочности, сортировка списка, стили badge |
-| `icons/*` | default / orange / red / error (16 и 32 px для toolbar) |
+| `icons/*` | default / green / orange / red / error (16 и 32 px для toolbar) |
 
 ## Ограничения (as is)
 

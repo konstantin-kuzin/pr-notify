@@ -22,11 +22,16 @@ import {
   sortMyPullRequestsNewestFirst,
   sortPullRequestsOldestFirst,
 } from "./ado-api.mjs";
-import { BADGE_STYLES, getBadgeUrgencyFromItems } from "./working-time.mjs";
+import {
+  BADGE_STYLES,
+  countWaitingPullRequests,
+  getToolbarBadgeStyleKey,
+} from "./working-time.mjs";
 
 const ALARM_NAME = "refresh-pull-requests";
 const CHECK_INTERVAL_MINUTES = 10;
 const REFRESH_MESSAGE_TYPE = "manual-refresh";
+const SYNC_BADGE_MESSAGE_TYPE = "sync-badge";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
 const MY_COMPLETED_PAGE_SIZE = 10;
@@ -66,14 +71,35 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes[ADO_CONFIG_KEY]) {
+  if (areaName !== "local") {
     return;
   }
 
-  void refreshPullRequests("config-change");
+  if (changes[ADO_CONFIG_KEY]) {
+    void refreshPullRequests("config-change");
+  }
+
+  if (changes[STORAGE_KEY]) {
+    void restoreBadgeFromState();
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === SYNC_BADGE_MESSAGE_TYPE) {
+    void restoreBadgeFromState()
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+    return true;
+  }
+
   if (message?.type === REFRESH_MESSAGE_TYPE) {
     void restoreBadgeFromState();
 
@@ -131,7 +157,13 @@ void bootstrap({ refresh: false, trigger: "service-worker-load" });
 
 async function restoreBadgeFromState() {
   const state = await getStoredState();
-  await updateBadge(state.count, {
+  const count = state.lastError ? 0 : countWaitingPullRequests(state.items);
+
+  if (state.count !== count) {
+    await saveState({ ...state, count });
+  }
+
+  await updateBadge(count, {
     isError: !!state.lastError,
     items: state.items,
     checkedAt: state.lastCheckedAt,
@@ -141,14 +173,9 @@ async function restoreBadgeFromState() {
 async function bootstrap({ refresh, trigger }) {
   await ensureAlarm();
   void checkForUpdates();
+  await restoreBadgeFromState();
 
   const state = await getStoredState();
-  const hasError = !!state.lastError;
-  await updateBadge(hasError ? 0 : state.count, {
-    isError: hasError,
-    items: state.items,
-    checkedAt: state.lastCheckedAt,
-  });
 
   if (refresh || !state.lastSuccessAt) {
     await refreshPullRequests(trigger);
@@ -236,7 +263,7 @@ async function refreshPullRequests(trigger) {
 
     const nextState = {
       items,
-      count: items.length,
+      count: countWaitingPullRequests(items),
       approvedItems,
       myItems,
       myCount: myItems.length,
@@ -374,6 +401,10 @@ const ICON_PATHS = {
     16: "icons/icon-16.png",
     32: "icons/icon-32.png",
   },
+  green: {
+    16: "icons/icon-16-green.png",
+    32: "icons/icon-32-green.png",
+  },
   orange: {
     16: "icons/icon-16-orange.png",
     32: "icons/icon-32-orange.png",
@@ -388,41 +419,25 @@ const ICON_PATHS = {
   },
 };
 
-function getIconPathsFromItems(items, checkedAt) {
-  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
-
-  if (urgency === "red") {
-    return ICON_PATHS.red;
-  }
-
-  if (urgency === "orange") {
-    return ICON_PATHS.orange;
-  }
-
-  return ICON_PATHS.default;
+function getIconPathsForBadge(count, items, checkedAt) {
+  const key = getToolbarBadgeStyleKey(count, items, checkedAt);
+  return ICON_PATHS[key] ?? ICON_PATHS.default;
 }
 
 async function updateBadge(count, { isError = false, items = [], checkedAt = null } = {}) {
-  const text = isError || count <= 0 ? "" : String(count);
-
   if (isError) {
     await chrome.action.setIcon({ path: ICON_PATHS.error });
     await chrome.action.setBadgeText({ text: "" });
     return;
   }
 
-  await chrome.action.setIcon({ path: getIconPathsFromItems(items, checkedAt) });
+  await chrome.action.setIcon({ path: getIconPathsForBadge(count, items, checkedAt) });
 
-  if (count <= 0) {
-    await chrome.action.setBadgeText({ text: "" });
-    return;
-  }
-
-  const urgency = getBadgeUrgencyFromItems(items, checkedAt);
-  const style = BADGE_STYLES[urgency] ?? BADGE_STYLES.gray;
+  const style = BADGE_STYLES[getToolbarBadgeStyleKey(count, items, checkedAt)]
+    ?? BADGE_STYLES.gray;
 
   await chrome.action.setBadgeBackgroundColor({ color: style.background });
-  await chrome.action.setBadgeText({ text });
+  await chrome.action.setBadgeText({ text: String(count) });
 
   if (chrome.action.setBadgeTextColor) {
     await chrome.action.setBadgeTextColor({ color: style.text });

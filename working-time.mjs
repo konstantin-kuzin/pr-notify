@@ -104,6 +104,7 @@ const BADGE_THRESHOLD_HOURS = {
 /** @type {Record<string, { background: string, text: string }>} */
 export const BADGE_STYLES = {
   gray: { background: "#9e9e9e", text: "#ffffff" },
+  green: { background: "#2e7d32", text: "#ffffff" },
   yellow: { background: "#f9a825", text: "#1a1a1a" },
   orange: { background: "#ef6c00", text: "#ffffff" },
   red: { background: "#ca2c2c", text: "#ffffff" },
@@ -157,6 +158,19 @@ export function hasUpdatesAfterLastGroupComment(item) {
   }
 
   return commitTimestamp > commentTimestamp;
+}
+
+/**
+ * Число PR для общего счётчика Review: только ожидающие ревью, без NO CHANGES.
+ * @param {Array<{ lastCommitAt?: string, lastGroupCommentAt?: string }>|null|undefined} items
+ * @returns {number}
+ */
+export function countWaitingPullRequests(items) {
+  if (!Array.isArray(items)) {
+    return 0;
+  }
+
+  return items.filter(hasUpdatesAfterLastGroupComment).length;
 }
 
 /**
@@ -220,6 +234,21 @@ export function getBadgeUrgencyFromItems(items, checkedAt) {
   }
 
   return getWorkingTimeUrgency(maxMinutes) ?? "gray";
+}
+
+/**
+ * Стиль badge счётчика: 0 ожидающих — зелёный, иначе срочность по рабочему времени.
+ * @param {number} count
+ * @param {Array<{ updatedAt?: string, createdAt?: string, lastCommitAt?: string, lastGroupCommentAt?: string }>} items
+ * @param {string|null|undefined} checkedAt
+ * @returns {"green"|"gray"|"yellow"|"orange"|"red"}
+ */
+export function getToolbarBadgeStyleKey(count, items, checkedAt) {
+  if (!count || count <= 0) {
+    return "green";
+  }
+
+  return getBadgeUrgencyFromItems(items, checkedAt);
 }
 
 /** PR без новых пушей после комментария — в конце списка; остальные — старые выше. */

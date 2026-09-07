@@ -63,7 +63,7 @@ done
 | [`working-time.mjs`](working-time.mjs) | Рабочие часы (пн–пт, 10:00–18:00 МСК), пороги срочности, стили badge |
 | [`options.html`](options.html) / [`options.css`](options.css) / [`options.mjs`](options.mjs) | Страница настроек подключения и reviewer-групп |
 | [`popup.html`](popup.html) / [`popup.css`](popup.css) / [`popup.mjs`](popup.mjs) | Popup со списком PR, markdown-описания, Approve |
-| [`icons/`](icons/) | Иконки toolbar: default / orange / red / error (16 и 32 px) |
+| [`icons/`](icons/) | Иконки toolbar: default / green / orange / red / error (16 и 32 px) |
 | [`docs/documentation.md`](docs/documentation.md) | Полная справка по поведению, storage, API |
 
 ### Ключи `chrome.storage.local`
