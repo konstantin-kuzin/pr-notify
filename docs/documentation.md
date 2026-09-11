@@ -12,7 +12,8 @@
 В списках дополнительно:
 
 - **Policies** — проблемы required/optional-политик, из‑за которых недоступен Complete или видны красные Optional (на Review — раскрываемый бейдж; на My PRs у активных не-draft — список под карточкой);
-- **конфликты слияния** — бейдж «конфликт» и текст из Conflicts API (Review и активные My PRs).
+- **конфликты слияния** — бейдж «конфликт» и текст из Conflicts API (Review и активные My PRs);
+- на **My PRs** у активных не-draft — напоминание комментаторам в **IM** (копирование текста и открытие лички, без автоотправки).
 
 Данные получаются через **REST API** (`_apis/...`).
 
@@ -216,7 +217,7 @@
 - `count` — число PR из `items`, **ожидающих ревью** (`hasUpdatesAfterLastGroupComment`); группы **NO CHANGES**, **WAITING FOR AUTHOR** и **APPROVED** не входят. Влияет на badge toolbar и счётчик popup на вкладке Review;
 - `waitingForAuthorItems` — массив PR вкладки **Review** со статусом Waiting for the author (`vote === -5`; с last-commit/threads, без политик и конфликтов); в badge и уведомления **не** входят;
 - `approvedItems` — массив уже одобренных PR вкладки **Review** (без политик, конфликтов и last-commit enrichment); в badge и уведомления **не** входят;
-- `myItems` — массив **активных** элементов вкладки **My PRs** (включая черновики): те же базовые поля плюс `targetBranch`, у не-draft — `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`, у черновиков — `isDraft: true`;
+- `myItems` — массив **активных** элементов вкладки **My PRs** (включая черновики): те же базовые поля плюс `targetBranch`, `pendingReviewerGroupNames` (группы без `vote >= 5`), `waitingForAuthorReviewers` (люди с `vote === -5`, для @упоминания в канале), у не-draft — `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`, у черновиков — `isDraft: true`;
 - `myCount` — длина `myItems` (активные, включая черновики; Complete в storage не кэшируются);
 - `matchedSectionTitle` — служебное поле фильтра (заголовок секции совпадения, если используется);
 - `lastCheckedAt` — ISO-время последней попытки обновления;
@@ -348,7 +349,8 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - **Policies** — список под карточкой (см. раздел «Policies»); у черновиков Policies нет;
 - **конфликты** — бейдж в строке метаданных (см. раздел «Конфликты слияния»);
 - у черновиков — бейдж **Draft**;
-- иконка Storybook и описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются.
+- иконка Storybook и описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются;
+- **IM** — иконка в строке метаданных (только активные не-draft): первым чип **Hexa UI Contribute** (канал), затем **чипы с именами** комментаторов (без email и логина). Клик копирует черновик и открывает чат в приложении Squadus. Текст нужно вставить (Cmd+V). Сообщение **не** отправляется. Треды грузятся **по клику**.
 
 Карточка PR (**My PRs**, Complete):
 
@@ -363,12 +365,28 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 | `manual-refresh` | Ручное обновление активных списков Review/My PRs |
 | `approve-pull-request` | Approve (vote 10) |
 | `load-my-completed-pull-requests` | Страница Complete для вкладки My PRs (`skip`, `top`) |
+| `load-pr-im-reminders` | Комментаторы активного My PR для напоминания в IM (`pullRequestId`) |
 
 ## Approve
 
 - Сообщение типа `approve-pull-request` с `pullRequestId`.
 - Вызов **`PUT .../pullRequests/{id}/reviewers/{reviewerId}`** с телом `vote: 10` и `id` текущего пользователя (тот же GUID, что в `connectionData`).
 - После успеха — фоновое обновление списка с таймаутами/интервалом опроса (см. константы в `background.mjs`).
+
+## Напоминание комментаторам в IM (My PRs)
+
+Ручной пинг в корпоративный мессенджер **Squadus** (`im.kaspersky.com`), без автоотправки сообщения.
+
+1. На активной не-draft карточке My PRs иконка IM раскрывает панель.
+2. Popup шлёт в background **`load-pr-im-reminders`** с `pullRequestId`.
+3. REST: **`GET .../pullRequests/{id}/threads`**. В список попадают **все** уникальные авторы человеческих комментариев (не system, не удалённые), кроме автора PR (текущий пользователь / `MY_TAB_CREATOR_OVERRIDE_ID`) — и открывающие тред, и ответы, независимо от статуса треда.
+4. Логин IM: если `uniqueName` комментатора — email, берётся локальная часть в нижнем регистре (`Konstantin.Kuzin@kaspersky.com` → `konstantin.kuzin`); иначе Identities API (`Mail` / `MailAddress` / `uniqueName`). В UI показывается **только имя** (чип). Если имя похоже на email — домен отбрасывается. Если логин не сопоставился — чип неактивен.
+5. Первым всегда чип **Hexa UI Contribute**: копирует черновик и открывает канал (`squadus://room?host=im.kaspersky.com&path=channel/hexa-ui-contribute`). Черновик: markdown-ссылка `[Pull Request {id}:](url PR)` и название PR, ниже отдельными строками имена reviewer-групп на этом PR без финального апрува (`vote < 5`; Approved / Approved with suggestions уже не входят). Префикс `[проект]\\` у названия отбрасывается. Если есть люди с **Waiting for the author** (`vote === -5`, не группы и не автор PR) — ещё ниже строка `@логин` на каждого (логин IM из email / Identities, как у чипов комментаторов). Без логина остаётся отображаемое имя, без `@`.
+6. Клик по чипу комментатора: popup копирует черновик в буфер и открывает личку в **десктопном Squadus** (`squadus://room?host=im.kaspersky.com&path=direct/{username}`), без вкладки браузера. Текст в композер нативного окна расширение не подставляет — его нужно вставить (Cmd+V). Черновик:
+   `Привет, посмотри, пожалуйста, мой PR`  
+   markdown-ссылка `[Pull Request {id}:](url PR)` и название PR.
+
+Треды для этого сценария **не** входят в периодический `refreshPullRequests`. Кэш списка в памяти popup сбрасывается при обновлении `prState`.
 
 ## Уведомления
 
@@ -385,6 +403,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 | `options.html` / `options.css` / `options.mjs` | UI настроек |
 | `popup.html` / `popup.css` / `popup.mjs` | UI списка |
 | `working-time.mjs` | Рабочие часы (МСК), точка отсчёта и ожидание ревью, пороги срочности, сортировка списка, стили badge |
+| `im-chat.mjs` | Черновик напоминания и deep link в десктопный Squadus |
 | `icons/*` | default / green / orange / red / error (16 и 32 px для toolbar) |
 
 ## Ограничения (as is)
@@ -393,6 +412,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - Отбор PR зависит от корректности membership/group id и полей `reviewers` в ответе API.
 - `apiVersion` не на экране настроек — смена только в коде или вручную в storage.
 - Упрощённый markdown в popup не равен полному движку ADO/Web; сложные конструкции могут отображаться иначе.
+- Напоминание в IM открывает установленное приложение Squadus по схеме `squadus:`; вкладка `im.kaspersky.com` не используется. В композер десктопа текст нужно вставить из буфера.
 
 ## Проверка синтаксиса модулей
 
@@ -403,6 +423,7 @@ node --check ado-config.mjs
 node --check options.mjs
 node --check popup.mjs
 node --check working-time.mjs
+node --check im-chat.mjs
 ```
 
-Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.16**).
+Установка: режим разработчика в `chrome://extensions`, «Загрузить распакованное». Актуальная версия в [`manifest.json`](../manifest.json) (на момент сборки документации — **2.19**).

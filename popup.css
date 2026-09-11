@@ -442,6 +442,124 @@ body {
   color: var(--accent);
 }
 
+.popup__im {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 2px;
+  color: #0d5c3d;
+  cursor: pointer;
+  border-radius: 4px;
+  background: #e6f4ee;
+}
+
+.popup__im:hover {
+  color: var(--accent);
+}
+
+.popup__im:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.popup__im[aria-expanded="true"] {
+  color: var(--accent);
+}
+
+.popup__im svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.popup__item-im {
+  min-height: 0;
+}
+
+.popup__item-im--open {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.popup__im-panel {
+  margin: 0 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.popup__im-panel[hidden] {
+  display: none;
+}
+
+.popup__im-status {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.popup__im-chips + .popup__im-status {
+  margin-top: 6px;
+}
+
+.popup__im-status--error {
+  color: var(--danger);
+}
+
+.popup__im-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.popup__im-chip-item {
+  margin: 0;
+  max-width: 100%;
+}
+
+.popup__im-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: #e6f4ee;
+  color: #0d5c3d;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.popup__im-chip:hover,
+.popup__im-chip:focus-visible {
+  background: #d5eee2;
+}
+
+.popup__im-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.popup__im-chip:disabled {
+  background: #eeeeee;
+  color: var(--muted);
+  cursor: default;
+}
+
 .popup__blockers-badge {
   display: inline-flex;
   align-items: center;

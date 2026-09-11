@@ -7,6 +7,7 @@ import {
   attachPullRequestBlockingReasons,
   attachPullRequestConflictInfo,
   attachPullRequestLastCommitTimes,
+  attachWaitingForAuthorImUsernames,
   fetchConnectionIdentity,
   filterMyPullRequests,
   filterPullRequestsForExtension,
@@ -14,6 +15,7 @@ import {
   listActivePullRequestsByCreator,
   listActivePullRequestsForAllowedReviewers,
   listCompletedPullRequestsByCreator,
+  listPullRequestImReminders,
   logAdoError,
   mapPullRequestToItem,
   MY_TAB_CREATOR_OVERRIDE_ID,
@@ -34,6 +36,7 @@ const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const SYNC_BADGE_MESSAGE_TYPE = "sync-badge";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
+const LOAD_PR_IM_REMINDERS_MESSAGE_TYPE = "load-pr-im-reminders";
 const MY_COMPLETED_PAGE_SIZE = 10;
 const STORAGE_KEY = "prState";
 const UPDATE_STATE_KEY = "prUpdateState";
@@ -140,6 +143,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })
       .then((result) => {
         sendResponse({ ok: true, ...result });
+      })
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+    return true;
+  }
+
+  if (message?.type === LOAD_PR_IM_REMINDERS_MESSAGE_TYPE) {
+    void loadPullRequestImReminders(message?.pullRequestId)
+      .then((commenters) => {
+        sendResponse({ ok: true, commenters });
       })
       .catch((error) => {
         sendResponse({
@@ -268,6 +286,12 @@ async function refreshPullRequests(trigger) {
         .map((pr) => mapPullRequestToItem(pr, config))
         .filter(Boolean),
     );
+
+    try {
+      await attachWaitingForAuthorImUsernames(config, myItems);
+    } catch (error) {
+      logAdoError("attachWaitingForAuthorImUsernames", error);
+    }
 
     const nextState = {
       items,
@@ -538,6 +562,30 @@ async function loadMyCompletedPullRequests(options = {}) {
     hasMore,
     nextSkip: skip + pullRequests.length,
   };
+}
+
+/**
+ * Комментаторы активного PR кроме автора — для ручного пинга в IM.
+ *
+ * @param {unknown} pullRequestId
+ */
+async function loadPullRequestImReminders(pullRequestId) {
+  const normalizedPullRequestId = normalizePullRequestId(pullRequestId);
+
+  if (!normalizedPullRequestId) {
+    throw new Error("Не передан идентификатор pull request.");
+  }
+
+  const config = await loadAdoConfig();
+  const validationErrors = validateAdoConfig(config);
+
+  if (validationErrors.length > 0) {
+    throw new Error(`${validationErrors.join(" ")} Откройте настройки расширения.`);
+  }
+
+  const identity = await fetchConnectionIdentity(config);
+  const myCreatorId = MY_TAB_CREATOR_OVERRIDE_ID || identity.id;
+  return listPullRequestImReminders(config, normalizedPullRequestId, myCreatorId);
 }
 
 function normalizePullRequestId(pullRequestId) {

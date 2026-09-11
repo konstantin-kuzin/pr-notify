@@ -1498,6 +1498,202 @@ function resolveLatestWaitingForAuthorVoteAt(threads, reviewerIds = []) {
   return pickLatestIsoDate(...(preferredDates.length > 0 ? preferredDates : anyDates)) || "";
 }
 
+function getCommentAuthor(comment) {
+  return comment?.author ?? comment?.Author ?? null;
+}
+
+function getCommentAuthorId(comment) {
+  const author = getCommentAuthor(comment);
+  return normalizePlainText(author?.id ?? author?.Id);
+}
+
+function extractEmailAddress(value) {
+  const match = normalizePlainText(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0] : "";
+}
+
+function imUsernameFromEmail(email) {
+  const address = extractEmailAddress(email);
+
+  if (!address) {
+    return "";
+  }
+
+  const localPart = address.split("@")[0]?.trim().toLowerCase() ?? "";
+  return /^[a-z0-9._-]+$/.test(localPart) ? localPart : "";
+}
+
+function pickAuthorEmail(author) {
+  if (!author || typeof author !== "object") {
+    return "";
+  }
+
+  return firstNonEmpty(
+    extractEmailAddress(author.uniqueName ?? author.UniqueName),
+    extractEmailAddress(author.mailAddress ?? author.MailAddress),
+    extractEmailAddress(author.email ?? author.Email),
+  );
+}
+
+function mapThreadCommentAuthor(comment) {
+  const author = getCommentAuthor(comment);
+  const id = getCommentAuthorId(comment);
+
+  if (!id) {
+    return null;
+  }
+
+  const email = pickAuthorEmail(author);
+
+  return {
+    id,
+    displayName: firstNonEmpty(
+      author?.displayName,
+      author?.DisplayName,
+      author?.uniqueName,
+      author?.UniqueName,
+      id,
+    ),
+    uniqueName: normalizePlainText(author?.uniqueName ?? author?.UniqueName),
+    email,
+    imUsername: imUsernameFromEmail(email),
+  };
+}
+
+/**
+ * Уникальные авторы человеческих комментариев в PR, кроме текущего пользователя.
+ *
+ * @param {Array<any>} threads
+ * @param {string} currentUserId
+ */
+function collectPullRequestCommentAuthors(threads, currentUserId) {
+  const myId = normalizePlainText(currentUserId);
+
+  if (!myId || !Array.isArray(threads)) {
+    return [];
+  }
+
+  /** @type {Map<string, ReturnType<typeof mapThreadCommentAuthor>>} */
+  const byId = new Map();
+
+  for (const thread of threads) {
+    if (thread?.isDeleted === true) {
+      continue;
+    }
+
+    const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+
+    for (const comment of comments) {
+      if (!isUserPullRequestComment(comment)) {
+        continue;
+      }
+
+      const authorId = getCommentAuthorId(comment);
+
+      if (!authorId || authorId === myId || byId.has(authorId)) {
+        continue;
+      }
+
+      const mapped = mapThreadCommentAuthor(comment);
+
+      if (mapped) {
+        byId.set(authorId, mapped);
+      }
+    }
+  }
+
+  return [...byId.values()];
+}
+
+/**
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {Array<{ id: string, email: string, imUsername: string, uniqueName: string }>} people
+ */
+async function attachImUsernames(config, people) {
+  const missing = people.filter((person) => !person.imUsername);
+
+  if (missing.length === 0) {
+    return;
+  }
+
+  const identities = await resolveIdentityDescriptors(
+    config,
+    missing.map((person) => person.id),
+  );
+  const identityById = new Map();
+
+  for (const identity of identities) {
+    const id = normalizePlainText(identity?.id);
+
+    if (id) {
+      identityById.set(id, identity);
+    }
+  }
+
+  for (const person of missing) {
+    const identity = identityById.get(person.id);
+
+    if (!identity) {
+      continue;
+    }
+
+    const email = firstNonEmpty(
+      extractEmailAddress(getIdentityProperty(identity, "Mail")),
+      extractEmailAddress(getIdentityProperty(identity, "MailAddress")),
+      extractEmailAddress(identity?.uniqueName),
+      extractEmailAddress(person.uniqueName),
+    );
+
+    if (!email) {
+      continue;
+    }
+
+    person.email = email;
+    person.imUsername = imUsernameFromEmail(email);
+  }
+}
+
+/**
+ * Комментаторы PR кроме автора — список для ручного напоминания в IM.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {string | number} pullRequestId
+ * @param {string} currentUserId
+ * @returns {Promise<Array<{
+ *   id: string,
+ *   displayName: string,
+ *   uniqueName: string,
+ *   email: string,
+ *   imUsername: string,
+ * }>>}
+ */
+export async function listPullRequestImReminders(config, pullRequestId, currentUserId) {
+  const prId = String(pullRequestId ?? "").trim();
+
+  if (!prId) {
+    throw new Error("Не передан идентификатор pull request.");
+  }
+
+  const threads = await fetchGitPullRequestThreads(
+    config,
+    config.project.trim(),
+    config.repositoryId.trim(),
+    prId,
+  );
+  const commenters = collectPullRequestCommentAuthors(threads, currentUserId);
+
+  try {
+    await attachImUsernames(config, commenters);
+  } catch (error) {
+    logAdoError(`attachImUsernames ${prId}`, error);
+  }
+
+  return commenters.sort((left, right) => {
+    const byName = left.displayName.localeCompare(right.displayName, "ru", { sensitivity: "base" });
+    return byName || left.id.localeCompare(right.id);
+  });
+}
+
 /**
  * Обогащает PR полным description, временем пуша source и (опционально) последним
  * комментарием участника reviewer-группы.
@@ -2260,9 +2456,116 @@ function reviewerHasApprovedVote(reviewer) {
   return Number(reviewer?.vote ?? 0) >= 5;
 }
 
+/**
+ * Имена reviewer-групп на PR без финального апрува (vote < 5).
+ *
+ * @param {any} pullRequest
+ * @returns {string[]}
+ */
+export function listPendingReviewerGroupNames(pullRequest) {
+  const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
+  const names = [];
+
+  for (const reviewer of reviewers) {
+    if (reviewer?.isContainer !== true || reviewerHasApprovedVote(reviewer)) {
+      continue;
+    }
+
+    const name = formatReviewerGroupName(reviewer);
+
+    if (name) {
+      names.push(name);
+    }
+  }
+
+  return [...new Set(names)].sort((left, right) => {
+    return left.localeCompare(right, "ru", { sensitivity: "base" });
+  });
+}
+
+function formatReviewerGroupName(reviewer) {
+  const raw = firstNonEmpty(reviewer?.displayName, reviewer?.uniqueName);
+  const slash = raw.lastIndexOf("\\");
+
+  return slash >= 0 ? raw.slice(slash + 1).trim() : raw;
+}
+
 /** ADO: -5 — Waiting for the author. */
 function reviewerHasWaitingForAuthorVote(reviewer) {
   return Number(reviewer?.vote ?? 0) === -5;
+}
+
+/**
+ * Люди (не группы) с vote Waiting for the author, кроме автора PR.
+ *
+ * @param {any} pullRequest
+ * @returns {Array<{
+ *   id: string,
+ *   displayName: string,
+ *   uniqueName: string,
+ *   email: string,
+ *   imUsername: string,
+ * }>}
+ */
+export function listWaitingForAuthorReviewers(pullRequest) {
+  const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
+  const authorId = normalizePlainText(
+    pullRequest?.createdBy?.id ?? pullRequest?.createdBy?.Id,
+  );
+  const byId = new Map();
+
+  for (const reviewer of reviewers) {
+    if (reviewer?.isContainer === true || !reviewerHasWaitingForAuthorVote(reviewer)) {
+      continue;
+    }
+
+    const id = normalizePlainText(reviewer?.id);
+
+    if (!id || id === authorId || byId.has(id)) {
+      continue;
+    }
+
+    const email = pickAuthorEmail(reviewer);
+
+    byId.set(id, {
+      id,
+      displayName: firstNonEmpty(reviewer?.displayName, reviewer?.uniqueName, id),
+      uniqueName: normalizePlainText(reviewer?.uniqueName),
+      email,
+      imUsername: imUsernameFromEmail(email),
+    });
+  }
+
+  return [...byId.values()].sort((left, right) => {
+    const byName = left.displayName.localeCompare(right.displayName, "ru", { sensitivity: "base" });
+    return byName || left.id.localeCompare(right.id);
+  });
+}
+
+/**
+ * Добирает логин IM для Waiting for the author, если в uniqueName не было email.
+ *
+ * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
+ * @param {Array<{ waitingForAuthorReviewers?: Array<{ id: string, email: string, imUsername: string, uniqueName: string }> }>} items
+ */
+export async function attachWaitingForAuthorImUsernames(config, items) {
+  const people = [];
+
+  for (const item of items) {
+    if (!Array.isArray(item?.waitingForAuthorReviewers)) {
+      continue;
+    }
+
+    people.push(
+      ...item.waitingForAuthorReviewers.filter((person) => !person.imUsername),
+    );
+  }
+
+  if (people.length === 0) {
+    return;
+  }
+
+  await attachImUsernames(config, people);
 }
 
 function findReviewerById(reviewers, reviewerId) {
@@ -2500,6 +2803,8 @@ export function mapPullRequestToItem(pr, config) {
     ...(blockingReasons !== undefined ? { blockingReasons } : {}),
     ...(optionalPolicyReasons !== undefined ? { optionalPolicyReasons } : {}),
     ...(conflictText ? { conflictText } : {}),
+    pendingReviewerGroupNames: listPendingReviewerGroupNames(pr),
+    waitingForAuthorReviewers: listWaitingForAuthorReviewers(pr),
   };
 }
 

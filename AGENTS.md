@@ -38,12 +38,13 @@ node --check ado-config.mjs
 node --check options.mjs
 node --check popup.mjs
 node --check working-time.mjs
+node --check im-chat.mjs
 ```
 
 Или одной командой:
 
 ```bash
-for f in background.mjs ado-api.mjs ado-config.mjs options.mjs popup.mjs working-time.mjs; do
+for f in background.mjs ado-api.mjs ado-config.mjs options.mjs popup.mjs working-time.mjs im-chat.mjs; do
   node --check "$f" || exit 1
 done
 ```
@@ -58,11 +59,12 @@ done
 |------|------------|
 | [`manifest.json`](manifest.json) | MV3: permissions, service worker, popup, иконки |
 | [`background.mjs`](background.mjs) | Service worker: alarms, storage, badge, уведомления, оркестрация API, approve |
-| [`ado-api.mjs`](ado-api.mjs) | HTTP к Azure DevOps REST (`_apis/...`), фильтрация PR, маппинг в модель UI |
+| [`ado-api.mjs`](ado-api.mjs) | HTTP к Azure DevOps REST (`_apis/...`), фильтрация PR, маппинг в модель UI, комментаторы для IM |
 | [`ado-config.mjs`](ado-config.mjs) | Ключ `adoConfig`, дефолты, валидация, нормализация |
 | [`working-time.mjs`](working-time.mjs) | Рабочие часы (пн–пт, 10:00–18:00 МСК), пороги срочности, стили badge |
 | [`options.html`](options.html) / [`options.css`](options.css) / [`options.mjs`](options.mjs) | Страница настроек подключения и reviewer-групп |
-| [`popup.html`](popup.html) / [`popup.css`](popup.css) / [`popup.mjs`](popup.mjs) | Popup со списком PR, markdown-описания, Approve |
+| [`popup.html`](popup.html) / [`popup.css`](popup.css) / [`popup.mjs`](popup.mjs) | Popup со списком PR, markdown-описания, Approve, напоминание в IM |
+| [`im-chat.mjs`](im-chat.mjs) | Черновик напоминания и deep link в десктопный Squadus |
 | [`icons/`](icons/) | Иконки toolbar: default / green / orange / red / error (16 и 32 px) |
 | [`docs/documentation.md`](docs/documentation.md) | Полная справка по поведению, storage, API |
 
@@ -97,6 +99,7 @@ options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 - **Рабочее время и срочность:** [`working-time.mjs`](working-time.mjs) — пороги 6 / 8 / 16 рабочих часов; точка отсчёта от `lastCommitAt` с учётом комментариев группы; сортировка «ожидающие ревью» выше.
 - **Approve (vote: 10):** сообщение `approve-pull-request` в [`background.mjs`](background.mjs), REST в `ado-api.mjs`.
 - **Complete на My PRs PRs:** сообщение `load-my-completed-pull-requests` в [`background.mjs`](background.mjs) / [`popup.mjs`](popup.mjs).
+- **Напоминание в IM:** сообщение `load-pr-im-reminders` — треды PR, чипы имён; первым чип канала Hexa UI Contribute (ссылка на PR, группы без апрува и @логины Waiting for the author). Popup копирует черновик и открывает чат в десктопном Squadus (`squadus://…`, без вкладки браузера и без автоотправки).
 - **Markdown в popup:** упрощённый парсер в [`popup.mjs`](popup.mjs) — не полноценный CommonMark.
 - **Периодическое обновление:** alarm каждые 10 мин (`CHECK_INTERVAL_MINUTES` в `background.mjs`).
 
@@ -138,7 +141,7 @@ options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 
 | Задача | Где править |
 |--------|-------------|
-| UI popup / вкладки Review·My PRs / markdown / approve | `popup.mjs`, `popup.css`, `popup.html` |
+| UI popup / вкладки Review·My PRs / markdown / approve / IM | `popup.mjs`, `popup.css`, `popup.html`, `im-chat.mjs` |
 | Настройки ADO / группы | `options.mjs`, `options.css`, `ado-config.mjs` |
 | Логика фильтрации / REST | `ado-api.mjs` |
 | Badge, alarms, уведомления | `background.mjs` |

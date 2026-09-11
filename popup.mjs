@@ -8,6 +8,13 @@ import {
   hasUpdatesAfterLastGroupComment,
   sortPullRequestsOldestFirst,
 } from "./working-time.mjs";
+import {
+  buildImContributeDraft,
+  buildImReminderDraft,
+  HEXA_UI_CONTRIBUTE_LABEL,
+  openImDesktopChat,
+  openImHexaUiContributeChannel,
+} from "./im-chat.mjs";
 
 const STORAGE_KEY = "prState";
 const UPDATE_STATE_KEY = "prUpdateState";
@@ -17,6 +24,7 @@ const REFRESH_MESSAGE_TYPE = "manual-refresh";
 const SYNC_BADGE_MESSAGE_TYPE = "sync-badge";
 const APPROVE_MESSAGE_TYPE = "approve-pull-request";
 const LOAD_MY_COMPLETED_MESSAGE_TYPE = "load-my-completed-pull-requests";
+const LOAD_PR_IM_REMINDERS_MESSAGE_TYPE = "load-pr-im-reminders";
 const MY_COMPLETED_PAGE_SIZE = 20;
 const TAB_REVIEW = "review";
 const TAB_MY = "my";
@@ -85,6 +93,10 @@ let myCompletedHasMore = false;
 let myCompletedLoaded = false;
 let isLoadingMyCompleted = false;
 let myCompletedError = "";
+/** @type {Map<string, { status: "loading" | "ready" | "error", commenters?: Array<{ id: string, displayName: string, imUsername: string }>, error?: string }>} */
+const imRemindersByPrId = new Map();
+/** @type {Map<string, Promise<void>>} */
+const imRemindersPromises = new Map();
 
 void init();
 
@@ -137,6 +149,7 @@ async function init() {
         ...(changes[STORAGE_KEY].newValue ?? {}),
       };
       resetMyCompletedState();
+      resetImRemindersState();
     }
 
     if (changes[ADO_CONFIG_KEY]) {
@@ -366,6 +379,11 @@ function resetMyCompletedState() {
   myCompletedLoaded = false;
   isLoadingMyCompleted = false;
   myCompletedError = "";
+}
+
+function resetImRemindersState() {
+  imRemindersByPrId.clear();
+  imRemindersPromises.clear();
 }
 
 async function ensureMyCompletedLoaded() {
@@ -644,6 +662,14 @@ function createItemElement(item, options = {}) {
   }
 
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
+  let imRemindUi = null;
+
+  if (mode === TAB_MY && !isCompleted && !isDraft) {
+    imRemindUi = createImRemindToggle(item);
+    authorRow.append(imRemindUi.icon);
+  }
+
+  /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
   let descriptionUi = null;
 
   if (item.description) {
@@ -712,6 +738,10 @@ function createItemElement(item, options = {}) {
 
   if (descriptionUi) {
     itemContent.append(descriptionUi.section);
+  }
+
+  if (imRemindUi) {
+    itemContent.append(imRemindUi.section);
   }
 
   itemMain.append(itemContent);
@@ -1072,6 +1102,290 @@ function createStorybookButton(item) {
   });
 
   return button;
+}
+
+const IM_ICON_SVG = `<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" aria-hidden="true">
+  <path fill="currentColor" d="M3 3.25h10A1.25 1.25 0 0 1 14.25 4.5v5.5A1.25 1.25 0 0 1 13 11.25H6.4L3 13.75V4.5A1.25 1.25 0 0 1 4.25 3.25H3z"/>
+</svg>`;
+
+/**
+ * @param {string} text
+ */
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_error) {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.top = "-9999px";
+    document.body.append(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    return copied;
+  }
+}
+
+/**
+ * Иконка IM в строке метаданных My PRs: раскрывает список комментаторов.
+ *
+ * @param {any} item
+ * @returns {{ icon: HTMLSpanElement, section: HTMLDivElement }}
+ */
+function createImRemindToggle(item) {
+  const prKey = String(item.id).replace(/[^\w-]/g, "_");
+  const section = document.createElement("div");
+  section.className = "popup__item-im";
+
+  const panel = document.createElement("div");
+  panel.className = "popup__im-panel";
+  panel.hidden = true;
+  panel.setAttribute("role", "region");
+  panel.id = `pr-im-${prKey}`;
+  section.append(panel);
+
+  const icon = document.createElement("span");
+  icon.className = "popup__im";
+  icon.setAttribute("role", "button");
+  icon.tabIndex = 0;
+  icon.setAttribute("aria-expanded", "false");
+  icon.setAttribute("aria-controls", panel.id);
+  icon.setAttribute("aria-label", "Напомнить комментаторам в IM");
+  icon.setAttribute("title", "Напомнить комментаторам в IM");
+  icon.innerHTML = IM_ICON_SVG;
+
+  const fillPanel = () => {
+    renderImRemindersPanel(panel, item);
+  };
+
+  const toggle = () => {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    icon.setAttribute("aria-expanded", open ? "true" : "false");
+    section.classList.toggle("popup__item-im--open", open);
+
+    if (open) {
+      void ensureImRemindersLoaded(item, fillPanel);
+    }
+  };
+
+  icon.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggle();
+  });
+
+  icon.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
+  });
+
+  return { icon, section };
+}
+
+/**
+ * @param {HTMLElement} panel
+ * @param {any} item
+ */
+function renderImRemindersPanel(panel, item) {
+  const cached = imRemindersByPrId.get(String(item.id));
+  panel.replaceChildren();
+
+  const commenters = Array.isArray(cached?.commenters) ? cached.commenters : [];
+  const list = document.createElement("ul");
+  list.className = "popup__im-chips";
+  list.setAttribute("aria-label", "Напоминание в IM");
+  list.append(createImContributeChip(item));
+
+  for (const commenter of commenters) {
+    list.append(createImCommenterChip(item, commenter));
+  }
+
+  panel.append(list);
+
+  if (!cached || cached.status === "loading") {
+    const status = document.createElement("p");
+    status.className = "popup__im-status";
+    status.textContent = "Загрузка комментариев…";
+    panel.append(status);
+    return;
+  }
+
+  if (cached.status === "error") {
+    const status = document.createElement("p");
+    status.className = "popup__im-status popup__im-status--error";
+    status.textContent = cached.error || "Не удалось загрузить комментарии.";
+    panel.append(status);
+    return;
+  }
+
+  if (commenters.length === 0) {
+    const status = document.createElement("p");
+    status.className = "popup__im-status";
+    status.textContent = "Нет комментаторов";
+    panel.append(status);
+  }
+}
+
+/**
+ * Имя без email для чипа.
+ *
+ * @param {{ displayName?: string, id?: string }} commenter
+ */
+function formatCommenterChipLabel(commenter) {
+  const raw = String(commenter?.displayName ?? "").trim();
+
+  if (!raw) {
+    return String(commenter?.id ?? "Без имени");
+  }
+
+  if (!raw.includes("@")) {
+    return raw;
+  }
+
+  const local = raw.split("@")[0].replace(/[._]+/g, " ").trim();
+  return local || raw;
+}
+
+/**
+ * @param {any} item
+ */
+function createImContributeChip(item) {
+  const row = document.createElement("li");
+  row.className = "popup__im-chip-item";
+  const chip = document.createElement("button");
+  chip.className = "popup__im-chip";
+  chip.type = "button";
+  chip.textContent = HEXA_UI_CONTRIBUTE_LABEL;
+  chip.setAttribute("aria-label", `Открыть канал ${HEXA_UI_CONTRIBUTE_LABEL} в Squadus`);
+  chip.setAttribute(
+    "title",
+    `Открыть канал ${HEXA_UI_CONTRIBUTE_LABEL}. Текст уже в буфере — вставьте в чат`,
+  );
+  chip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void openImContributeChat(item);
+  });
+  row.append(chip);
+  return row;
+}
+
+/**
+ * @param {any} item
+ * @param {{ id: string, displayName: string, imUsername: string }} commenter
+ */
+function createImCommenterChip(item, commenter) {
+  const row = document.createElement("li");
+  row.className = "popup__im-chip-item";
+  const label = formatCommenterChipLabel(commenter);
+  const username = typeof commenter.imUsername === "string" ? commenter.imUsername.trim() : "";
+  const chip = document.createElement("button");
+  chip.className = "popup__im-chip";
+  chip.type = "button";
+  chip.textContent = label;
+
+  if (!username) {
+    chip.disabled = true;
+    chip.setAttribute("title", `Не удалось открыть чат с ${label}`);
+    row.append(chip);
+    return row;
+  }
+
+  chip.setAttribute("aria-label", `Открыть личку с ${label} в Squadus`);
+  chip.setAttribute("title", `Открыть личку с ${label} в Squadus. Текст уже в буфере — вставьте в чат`);
+  chip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void openImReminderChat(item, username);
+  });
+
+  row.append(chip);
+  return row;
+}
+
+/**
+ * @param {any} item
+ * @param {string} username
+ */
+async function openImReminderChat(item, username) {
+  const draft = buildImReminderDraft(item);
+  const copied = copyTextToClipboard(draft.text);
+  openImDesktopChat(username);
+  await copied;
+}
+
+/**
+ * @param {any} item
+ */
+async function openImContributeChat(item) {
+  const draft = buildImContributeDraft(item);
+  const copied = copyTextToClipboard(draft.text);
+  openImHexaUiContributeChannel();
+  await copied;
+}
+
+/**
+ * @param {any} item
+ * @param {() => void} onUpdate
+ */
+async function ensureImRemindersLoaded(item, onUpdate) {
+  const id = String(item?.id ?? "");
+
+  if (!id) {
+    return;
+  }
+
+  const cached = imRemindersByPrId.get(id);
+
+  if (cached?.status === "ready" || cached?.status === "error") {
+    onUpdate();
+    return;
+  }
+
+  if (!cached) {
+    imRemindersByPrId.set(id, { status: "loading" });
+  }
+
+  onUpdate();
+
+  let pending = imRemindersPromises.get(id);
+
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: LOAD_PR_IM_REMINDERS_MESSAGE_TYPE,
+          pullRequestId: id,
+        });
+
+        if (!response?.ok) {
+          throw new Error(response?.error || "Не удалось загрузить комментарии.");
+        }
+
+        imRemindersByPrId.set(id, {
+          status: "ready",
+          commenters: Array.isArray(response.commenters) ? response.commenters : [],
+        });
+      } catch (error) {
+        imRemindersByPrId.set(id, {
+          status: "error",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        imRemindersPromises.delete(id);
+      }
+    })();
+    imRemindersPromises.set(id, pending);
+  }
+
+  await pending;
+  onUpdate();
 }
 
 /**
