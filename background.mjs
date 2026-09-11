@@ -44,6 +44,7 @@ const APPROVE_REFRESH_INTERVAL_MS = 2_000;
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  waitingForAuthorItems: [],
   approvedItems: [],
   myItems: [],
   myCount: 0,
@@ -224,18 +225,20 @@ async function refreshPullRequests(trigger) {
       listActivePullRequestsForAllowedReviewers(config, allowedReviewerIds),
       listActivePullRequestsByCreator(config, myCreatorId),
     ]);
-    const { filtered, approved } = await filterPullRequestsForExtension(
+    const { filtered, waitingForAuthor, approved } = await filterPullRequestsForExtension(
       config,
       rawPullRequests,
       identity.id,
     );
     const myFiltered = filterMyPullRequests(rawMyPullRequests);
     const groupMemberIds = await resolveConfiguredGroupMemberIds(config);
-    const enrichedPullRequests = await attachPullRequestLastCommitTimes(
-      config,
-      filtered,
-      groupMemberIds,
-    );
+    const [enrichedPullRequests, enrichedWaitingForAuthor] = await Promise.all([
+      attachPullRequestLastCommitTimes(config, filtered, groupMemberIds),
+      attachPullRequestLastCommitTimes(config, waitingForAuthor, groupMemberIds, {
+        captureWaitingForAuthorVote: true,
+        currentUserId: identity.id,
+      }),
+    ]);
     const [reviewWithReasons, myWithReasons] = await Promise.all([
       attachPullRequestBlockingReasons(config, enrichedPullRequests),
       attachPullRequestBlockingReasons(config, myFiltered),
@@ -247,6 +250,11 @@ async function refreshPullRequests(trigger) {
 
     const items = sortPullRequestsOldestFirst(
       reviewWithConflicts
+        .map((pr) => mapPullRequestToItem(pr, config))
+        .filter(Boolean),
+    );
+    const waitingForAuthorItems = sortPullRequestsOldestFirst(
+      enrichedWaitingForAuthor
         .map((pr) => mapPullRequestToItem(pr, config))
         .filter(Boolean),
     );
@@ -264,6 +272,7 @@ async function refreshPullRequests(trigger) {
     const nextState = {
       items,
       count: countWaitingPullRequests(items),
+      waitingForAuthorItems,
       approvedItems,
       myItems,
       myCount: myItems.length,

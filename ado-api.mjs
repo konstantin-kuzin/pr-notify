@@ -713,6 +713,7 @@ function formatPolicyBlockingReason(evaluation, pullRequest = null, statusById =
  * Для каждого PR подмешивает проблемы Policies из overview ADO:
  * - `blockingReasons` — Required (`isBlocking`), из‑за которых недоступен Complete;
  * - `optionalPolicyReasons` — Optional (не blocking), красные пункты в Optional.
+ * Черновики (`isDraft`) пропускаются без запроса evaluations.
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
@@ -723,6 +724,10 @@ export async function attachPullRequestBlockingReasons(config, pullRequests) {
       const prId = pullRequest?.pullRequestId;
 
       if (prId == null) {
+        return pullRequest;
+      }
+
+      if (pullRequest?.isDraft === true) {
         return pullRequest;
       }
 
@@ -934,12 +939,12 @@ export async function attachPullRequestConflictInfo(config, pullRequests) {
 }
 
 /**
- * Активные не-draft PR текущего пользователя (создателя).
+ * Активные PR текущего пользователя (создателя), включая черновики.
  *
  * @param {Array<any>} pullRequests
  */
 export function filterMyPullRequests(pullRequests) {
-  return pullRequests.filter((pullRequest) => isVisiblePullRequestForExtension(pullRequest));
+  return pullRequests.filter((pullRequest) => isActivePullRequestStatus(pullRequest?.status));
 }
 
 /**
@@ -1402,6 +1407,97 @@ function resolveLatestGroupMemberComment(threads, memberIds) {
   return latest;
 }
 
+function readAdoPropertyValue(container, key) {
+  if (!container || typeof container !== "object") {
+    return "";
+  }
+
+  const properties = container.properties ?? container.Properties ?? container;
+  const raw = properties?.[key];
+
+  if (raw == null) {
+    return "";
+  }
+
+  if (typeof raw === "object") {
+    return normalizePlainText(raw.$value ?? raw.value ?? "");
+  }
+
+  return normalizePlainText(raw);
+}
+
+function isWaitingForAuthorVoteEvent(thread, comment) {
+  const vote = Number(
+    readAdoPropertyValue(thread, "CodeReviewVoteResult")
+    || readAdoPropertyValue(comment, "CodeReviewVoteResult"),
+  );
+
+  if (vote === -5) {
+    return true;
+  }
+
+  const content = normalizePlainText(comment?.content ?? comment?.Content).toLowerCase();
+  return content.includes("voted waiting for the author");
+}
+
+/**
+ * Время последнего голоса Waiting for the author в тредах PR.
+ *
+ * @param {Array<any>} threads
+ * @param {Iterable<string>} [reviewerIds]
+ */
+function resolveLatestWaitingForAuthorVoteAt(threads, reviewerIds = []) {
+  if (!Array.isArray(threads)) {
+    return "";
+  }
+
+  const allowedAuthorIds = new Set(
+    [...reviewerIds].map((id) => normalizePlainText(id)).filter(Boolean),
+  );
+  /** @type {string[]} */
+  const preferredDates = [];
+  /** @type {string[]} */
+  const anyDates = [];
+
+  for (const thread of threads) {
+    if (thread?.isDeleted === true) {
+      continue;
+    }
+
+    const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+
+    for (const comment of comments) {
+      if (comment?.isDeleted === true || !isWaitingForAuthorVoteEvent(thread, comment)) {
+        continue;
+      }
+
+      const publishedAt = normalizeIsoDate(
+        comment.publishedDate
+        ?? comment.PublishedDate
+        ?? thread.publishedDate
+        ?? thread.lastUpdatedDate
+        ?? "",
+      );
+
+      if (!publishedAt) {
+        continue;
+      }
+
+      anyDates.push(publishedAt);
+
+      const authorId = normalizePlainText(
+        comment.author?.id ?? comment.Author?.id ?? comment.Author?.Id ?? "",
+      );
+
+      if (allowedAuthorIds.size === 0 || !authorId || allowedAuthorIds.has(authorId)) {
+        preferredDates.push(publishedAt);
+      }
+    }
+  }
+
+  return pickLatestIsoDate(...(preferredDates.length > 0 ? preferredDates : anyDates)) || "";
+}
+
 /**
  * Обогащает PR полным description, временем пуша source и (опционально) последним
  * комментарием участника reviewer-группы.
@@ -1409,11 +1505,20 @@ function resolveLatestGroupMemberComment(threads, memberIds) {
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
  * @param {Set<string>|Iterable<string>|null|undefined} [groupMemberIds]
+ * @param {{ captureWaitingForAuthorVote?: boolean, currentUserId?: string }} [options]
  */
-export async function attachPullRequestLastCommitTimes(config, pullRequests, groupMemberIds = null) {
+export async function attachPullRequestLastCommitTimes(
+  config,
+  pullRequests,
+  groupMemberIds = null,
+  options = {},
+) {
   const memberIds = groupMemberIds instanceof Set
     ? groupMemberIds
     : new Set(groupMemberIds ?? []);
+  const captureWaitingForAuthorVote = options.captureWaitingForAuthorVote === true;
+  const currentUserId = normalizePlainText(options.currentUserId);
+  const shouldFetchThreads = memberIds.size > 0 || captureWaitingForAuthorVote;
 
   return Promise.all(
     pullRequests.map(async (pullRequest) => {
@@ -1462,13 +1567,31 @@ export async function attachPullRequestLastCommitTimes(config, pullRequests, gro
           next.lastCommitAt = lastCommitAt;
         }
 
-        if (memberIds.size > 0) {
+        if (shouldFetchThreads) {
           try {
             const threads = await fetchGitPullRequestThreads(config, project, repo, prId);
-            const lastGroupCommentAt = resolveLatestGroupMemberComment(threads, memberIds);
 
-            if (lastGroupCommentAt) {
-              next.lastGroupCommentAt = lastGroupCommentAt;
+            if (memberIds.size > 0) {
+              const lastGroupCommentAt = resolveLatestGroupMemberComment(threads, memberIds);
+
+              if (lastGroupCommentAt) {
+                next.lastGroupCommentAt = lastGroupCommentAt;
+              }
+            }
+
+            if (captureWaitingForAuthorVote) {
+              const lastWaitingForAuthorAt = resolveLatestWaitingForAuthorVoteAt(
+                threads,
+                [currentUserId, ...memberIds],
+              );
+
+              if (lastWaitingForAuthorAt) {
+                next.lastWaitingForAuthorAt = lastWaitingForAuthorAt;
+                next.lastGroupCommentAt = pickLatestIsoDate(
+                  next.lastGroupCommentAt,
+                  lastWaitingForAuthorAt,
+                ) || lastWaitingForAuthorAt;
+              }
             }
           } catch (error) {
             logAdoError(`fetchGitPullRequestThreads ${prId}`, error);
@@ -2137,6 +2260,15 @@ function reviewerHasApprovedVote(reviewer) {
   return Number(reviewer?.vote ?? 0) >= 5;
 }
 
+/** ADO: -5 — Waiting for the author. */
+function reviewerHasWaitingForAuthorVote(reviewer) {
+  return Number(reviewer?.vote ?? 0) === -5;
+}
+
+function findReviewerById(reviewers, reviewerId) {
+  return reviewers.find((reviewer) => String(reviewer?.id ?? "") === String(reviewerId));
+}
+
 /**
  * Выбранные reviewer-группы на PR, иначе пустой массив.
  *
@@ -2204,6 +2336,28 @@ function hasApprovedAllowedReviewerVote(reviewers, currentUserId, selectedGroupI
 }
 
 /**
+ * Waiting for the author: личный vote === -5 (даже если группа ещё с vote === 0)
+ * или все выбранные группы на PR уже с vote === -5.
+ *
+ * @param {Array<any>} reviewers
+ * @param {string} currentUserId
+ * @param {string[]} selectedGroupIds
+ */
+function hasWaitingForAuthorAllowedReviewerVote(reviewers, currentUserId, selectedGroupIds) {
+  if (reviewerHasWaitingForAuthorVote(findReviewerById(reviewers, currentUserId))) {
+    return true;
+  }
+
+  const selectedGroupReviewers = getSelectedGroupReviewers(reviewers, selectedGroupIds);
+
+  if (selectedGroupReviewers.length > 0) {
+    return selectedGroupReviewers.every(reviewerHasWaitingForAuthorVote);
+  }
+
+  return false;
+}
+
+/**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<any>} pullRequests
  * @param {string} myId
@@ -2212,6 +2366,7 @@ export async function filterPullRequestsForExtension(config, pullRequests, myId)
   const { matchedSectionTitle } = getExtensionReviewerContext(config, myId);
   const selectedGroupIds = normalizeConfiguredGroupIds(config);
   const filtered = [];
+  const waitingForAuthor = [];
   const approved = [];
 
   for (const pullRequest of pullRequests) {
@@ -2220,6 +2375,11 @@ export async function filterPullRequestsForExtension(config, pullRequests, myId)
     }
 
     const reviewers = Array.isArray(pullRequest?.reviewers) ? pullRequest.reviewers : [];
+
+    if (hasWaitingForAuthorAllowedReviewerVote(reviewers, myId, selectedGroupIds)) {
+      waitingForAuthor.push(pullRequest);
+      continue;
+    }
 
     if (hasPendingAllowedReviewerVote(reviewers, myId, selectedGroupIds)) {
       filtered.push(pullRequest);
@@ -2231,7 +2391,7 @@ export async function filterPullRequestsForExtension(config, pullRequests, myId)
     }
   }
 
-  return { filtered, approved, matchedSectionTitle };
+  return { filtered, waitingForAuthor, approved, matchedSectionTitle };
 }
 
 function isVisiblePullRequestForExtension(pullRequest) {
@@ -2282,6 +2442,7 @@ export function mapPullRequestToItem(pr, config) {
   const status = normalizePullRequestStatus(pr?.status);
   const updatedAt = pickLatestIsoDate(
     normalizeIsoDate(pr?.lastGroupCommentAt),
+    normalizeIsoDate(pr?.lastWaitingForAuthorAt),
     normalizeIsoDate(pr?.lastCommitAt),
     closedAt,
     createdAt,
@@ -2314,6 +2475,7 @@ export function mapPullRequestToItem(pr, config) {
 
   const rawConflictText = typeof pr?.conflictText === "string" ? pr.conflictText.trim() : "";
   const conflictText = rawConflictText || "";
+  const isDraft = pr?.isDraft === true;
 
   if (!title || !url) {
     return null;
@@ -2329,10 +2491,12 @@ export function mapPullRequestToItem(pr, config) {
     status,
     lastCommitAt: normalizeIsoDate(pr?.lastCommitAt) || undefined,
     lastGroupCommentAt: normalizeIsoDate(pr?.lastGroupCommentAt) || undefined,
+    lastWaitingForAuthorAt: normalizeIsoDate(pr?.lastWaitingForAuthorAt) || undefined,
     description,
     url,
     ...(closedAt ? { closedAt } : {}),
     ...(targetBranch ? { targetBranch } : {}),
+    ...(isDraft ? { isDraft: true } : {}),
     ...(blockingReasons !== undefined ? { blockingReasons } : {}),
     ...(optionalPolicyReasons !== undefined ? { optionalPolicyReasons } : {}),
     ...(conflictText ? { conflictText } : {}),

@@ -671,6 +671,11 @@ body {
   color: #0e700e;
 }
 
+.popup__badge--draft {
+  background: #fff4ce;
+  color: #6d4c00;
+}
+
 .popup__load-more {
   padding: 4px 8px 8px;
 }

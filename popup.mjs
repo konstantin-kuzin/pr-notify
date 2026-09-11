@@ -47,6 +47,7 @@ const TOOLBAR_ICON_PATHS = {
 const DEFAULT_STATE = {
   items: [],
   count: 0,
+  waitingForAuthorItems: [],
   approvedItems: [],
   myItems: [],
   myCount: 0,
@@ -221,11 +222,15 @@ function render() {
     : countWaitingPullRequests(visibleItems);
   void syncToolbarBadge(currentState);
   const completedItems = isMyTab ? myCompletedItems : [];
+  const waitingForAuthorItems = isMyTab
+    ? []
+    : (Array.isArray(currentState.waitingForAuthorItems) ? currentState.waitingForAuthorItems : []);
   const approvedItems = isMyTab
     ? []
     : (Array.isArray(currentState.approvedItems) ? currentState.approvedItems : []);
   const hasListContent = visibleItems.length > 0
     || completedItems.length > 0
+    || waitingForAuthorItems.length > 0
     || approvedItems.length > 0;
   const waitingCompleted = isMyTab
     && !hasListContent
@@ -313,6 +318,14 @@ function render() {
 
     for (const item of waitingItems) {
       itemsList.append(createItemElement(item, { mode: TAB_REVIEW }));
+    }
+
+    if (waitingForAuthorItems.length > 0) {
+      itemsList.append(createGroupHeading("WAITING FOR AUTHOR"));
+
+      for (const item of waitingForAuthorItems) {
+        itemsList.append(createItemElement(item, { mode: TAB_REVIEW, waitingForAuthor: true }));
+      }
     }
 
     if (noChangesItems.length > 0) {
@@ -559,23 +572,27 @@ function createGroupHeading(text) {
 
 /**
  * @param {any} item
- * @param {{ mode?: "review" | "my", approved?: boolean }} [options]
+ * @param {{ mode?: "review" | "my", approved?: boolean, waitingForAuthor?: boolean }} [options]
  */
 function createItemElement(item, options = {}) {
   const mode = options.mode === TAB_MY ? TAB_MY : TAB_REVIEW;
   const isApproved = mode === TAB_REVIEW && options.approved === true;
+  const isWaitingForAuthor = mode === TAB_REVIEW && options.waitingForAuthor === true;
   const listItem = document.createElement("li");
   listItem.className = "popup__item";
   const isCompleted = mode === TAB_MY && item?.status === "completed";
-  const isTechPR = !isApproved && mode === TAB_REVIEW && isTechPullRequest(item.description);
-  const hasNoUpdates = isApproved
-    || (mode === TAB_REVIEW && !hasUpdatesAfterLastGroupComment(item));
+  const isDraft = mode === TAB_MY && item?.isDraft === true;
+  const isTechPR = !isApproved && !isWaitingForAuthor && mode === TAB_REVIEW
+    && isTechPullRequest(item.description);
+  const hasAuthorUpdates = mode === TAB_REVIEW && hasUpdatesAfterLastGroupComment(item);
+  const showNoUpdatesLabel = isApproved || !hasAuthorUpdates;
+  const isInactiveStyle = isApproved || !hasAuthorUpdates;
 
-  if (hasNoUpdates) {
+  if (mode === TAB_REVIEW && isInactiveStyle) {
     listItem.classList.add("popup__item--no-updates");
   }
 
-  const timeUrgency = !isApproved && mode === TAB_REVIEW
+  const timeUrgency = !isApproved && hasAuthorUpdates
     ? getItemWorkingTimeUrgency(item, currentState.lastCheckedAt)
     : null;
 
@@ -616,7 +633,7 @@ function createItemElement(item, options = {}) {
     fillMyMetaParagraph(author, item);
   } else {
     fillAuthorMetaParagraph(author, item, currentState.lastCheckedAt, timeUrgency, {
-      hasNoUpdates,
+      hasNoUpdates: showNoUpdatesLabel,
     });
   }
 
@@ -637,7 +654,7 @@ function createItemElement(item, options = {}) {
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
   let blockersUi = null;
 
-  if (mode === TAB_REVIEW && !isApproved) {
+  if (mode === TAB_REVIEW && !isApproved && !isWaitingForAuthor) {
     blockersUi = createBlockingReasonsToggle(item);
     if (blockersUi) {
       authorRow.append(blockersUi.icon);
@@ -645,7 +662,9 @@ function createItemElement(item, options = {}) {
   }
 
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
-  const conflictUi = isCompleted || isApproved ? null : createConflictToggle(item);
+  const conflictUi = isCompleted || isApproved || isWaitingForAuthor
+    ? null
+    : createConflictToggle(item);
   if (conflictUi) {
     authorRow.append(conflictUi.icon);
   }
@@ -654,6 +673,13 @@ function createItemElement(item, options = {}) {
     const badge = document.createElement("span");
     badge.className = "popup__badge popup__badge--complete";
     badge.textContent = "Complete";
+    authorRow.append(badge);
+  }
+
+  if (isDraft) {
+    const badge = document.createElement("span");
+    badge.className = "popup__badge popup__badge--draft";
+    badge.textContent = "Draft";
     authorRow.append(badge);
   }
 
@@ -672,7 +698,7 @@ function createItemElement(item, options = {}) {
 
   itemContent.append(itemHeader, authorRow);
 
-  if (mode === TAB_MY && !isCompleted) {
+  if (mode === TAB_MY && !isCompleted && !isDraft) {
     itemContent.append(createBlockingReasonsBlock(item));
   }
 

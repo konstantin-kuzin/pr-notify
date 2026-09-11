@@ -6,12 +6,12 @@
 
 Расширение **PR Notify** для **Google Chrome** показывает pull request’ы в **Git-репозитории Azure DevOps** в popup с двумя вкладками:
 
-- вкладка **Review** — активные PR, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы); ниже — уже одобренные (**APPROVED**);
-- вкладка **My PRs** — PR, **созданные** текущим пользователем: сначала **активные**, ниже — завершённые (**Complete**), с догрузкой по 10.
+- вкладка **Review** — активные PR, назначенные текущему пользователю как ревьюеру (лично и/или через выбранные reviewer-группы); после них — **WAITING FOR AUTHOR**, затем без новых пушей (**NO CHANGES**), ниже — уже одобренные (**APPROVED**);
+- вкладка **My PRs** — PR, **созданные** текущим пользователем: сначала **активные** (включая черновики), ниже — завершённые (**Complete**), с догрузкой по 10.
 
 В списках дополнительно:
 
-- **Policies** — проблемы required/optional-политик, из‑за которых недоступен Complete или видны красные Optional (на Review — раскрываемый бейдж; на My PRs у активных — список под карточкой);
+- **Policies** — проблемы required/optional-политик, из‑за которых недоступен Complete или видны красные Optional (на Review — раскрываемый бейдж; на My PRs у активных не-draft — список под карточкой);
 - **конфликты слияния** — бейдж «конфликт» и текст из Conflicts API (Review и активные My PRs).
 
 Данные получаются через **REST API** (`_apis/...`).
@@ -89,8 +89,9 @@
 6. Остаются PR, по которым ещё нет реакции «своих» ревьюеров:
    - если на PR есть хотя бы одна **выбранная reviewer-группа** — смотрим только её `vote`: карточка уходит из ожидающих, когда все такие группы уже проголосовали (в т.ч. апрув «via» участника). Личный `vote === 0` текущего пользователя **не** удерживает PR в списке ожидающих;
    - иначе (групп на PR нет или в настройках группы не выбраны) — остаётся PR, где **вы** числитесь ревьюером с **`vote === 0`**.
-7. Результат сортируется в [`sortPullRequestsOldestFirst`](../working-time.mjs): сначала PR, **ожидающие ревью** (есть новые пуши после последнего комментария группы или комментария ещё не было) — **старые выше** по **`updatedAt`**; PR **без новых обновлений** после комментария группы — **в конце** списка, под заголовком **NO CHANGES** (см. раздел «Рабочее время и срочность»).
-8. PR, которые уже одобрены «своими» ревьюерами, **не скрываются**: они пишутся в `prState.approvedItems` и показываются **ниже** ожидающих и NO CHANGES, под заголовком **APPROVED**. Критерий: `vote >= 5` (Approved / Approved with suggestions). Если на PR есть выбранные reviewer-группы — все такие группы уже одобрили; иначе одобрили **вы**. Политики, конфликты и last-commit enrichment для этой группы **не** запрашиваются. Сортировка: **новые выше** по `createdAt`. Reject / Waiting for author в APPROVED **не** попадают.
+7. Результат сортируется в [`sortPullRequestsOldestFirst`](../working-time.mjs): сначала PR, **ожидающие ревью** (есть новые пуши после последнего комментария группы или комментария ещё не было) — **старые выше** по **`updatedAt`**; PR **без новых обновлений** после комментария группы — под заголовком **NO CHANGES** (см. раздел «Рабочее время и срочность»).
+8. PR со статусом **Waiting for the author** (`vote === -5`) пишутся в `prState.waitingForAuthorItems` и показываются **сразу после** ожидающих ревью, под заголовком **WAITING FOR AUTHOR**, **до** NO CHANGES и APPROVED. Критерий: личный `vote === -5` текущего пользователя (даже если выбранная reviewer-группа ещё с `vote === 0`) либо все выбранные группы на PR уже с `vote === -5`. Для группы запрашиваются last-commit и треды (без Policies и конфликтов): если после голоса Waiting for the author (или последнего комментария группы) автор допушил — обычный стиль карточки и **рабочее время с последнего пуша**; иначе приглушённый стиль как у APPROVED и **«Нет обновлений»**. Сортировка как у ожидающих: сначала с обновлениями (старые выше), без обновлений ниже. В счётчик вкладки и badge **не** входят.
+9. PR, которые уже одобрены «своими» ревьюерами, **не скрываются**: они пишутся в `prState.approvedItems` и показываются **ниже** ожидающих, WAITING FOR AUTHOR и NO CHANGES, под заголовком **APPROVED**. Критерий: `vote >= 5` (Approved / Approved with suggestions). Если на PR есть выбранные reviewer-группы — все такие группы уже одобрили; иначе одобрили **вы**. Политики, конфликты и last-commit enrichment для этой группы **не** запрашиваются. Сортировка: **новые выше** по `createdAt`. Reject в APPROVED и WAITING FOR AUTHOR **не** попадает.
 
 ### My PRs PRs (мои PR)
 
@@ -101,11 +102,11 @@
 Параллельно с обновлением Review (`refreshPullRequests`):
 
 1. Запрос активных PR с **`searchCriteria.creatorId`**.
-2. Отбрасываются черновики и неактивные статусы (как в Review).
-3. Для каждого активного PR подмешиваются **Policies** (`blockingReasons` / `optionalPolicyReasons`) и при необходимости **конфликты** (`conflictText`) — см. разделы ниже.
-4. В элемент UI дополнительно: `targetBranch` (целевая ветка без `refs/heads/`), `status`.
+2. Отбрасываются неактивные статусы; **черновики (`isDraft`) остаются**.
+3. Для каждого **не-draft** активного PR подмешиваются **Policies** (`blockingReasons` / `optionalPolicyReasons`); конфликты (`conflictText`) — для активных, включая черновики, при `mergeStatus === conflicts` — см. разделы ниже.
+4. В элемент UI дополнительно: `targetBranch` (целевая ветка без `refs/heads/`), `status`, у черновиков — `isDraft: true`.
 5. Сортировка: **новые выше** по `createdAt` (`sortMyPullRequestsNewestFirst`).
-6. Результат пишется в `prState.myItems` / `myCount` (счётчик вкладки и `#count-badge` на My PRs — только активные).
+6. Результат пишется в `prState.myItems` / `myCount` (счётчик вкладки и `#count-badge` на My PRs — активные, **включая черновики**).
 
 #### Завершённые PR (Complete)
 
@@ -121,7 +122,7 @@
 
 ## Policies (Required + Optional)
 
-Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **ожидающих** PR вкладки Review и **активных** PR вкладки My PRs. Одобренные (APPROVED) не обогащаются политиками.
+Реализация: [`attachPullRequestBlockingReasons`](../ado-api.mjs). Вызывается в фоне для **ожидающих** PR вкладки Review и **активных не-draft** PR вкладки My PRs. Одобренные (APPROVED), Waiting for the author и черновики на My PRs не обогащаются политиками.
 
 ### API
 
@@ -152,7 +153,8 @@
 | Вкладка | Показ |
 |---------|--------|
 | **Review** | Если есть проблемные Required и/или Optional — розовый бейдж с **числом** замечаний; клик раскрывает список (Required сверху, блок **Optional** ниже). Если Optional нет, а Required — ровно один из наборов «ожидание голосов» (`0 of 1 reviewers approved` + `Votes check` + `Required reviewers have not approved`, либо только `Votes check` + `Required reviewers have not approved`), бейдж показывает **Votes check** вместо числа. |
-| **My PRs** (активные) | Под карточкой: список Required **или** **«Готов к Complete»** (если Required пуст), затем блок **Optional** при наличии; либо **«Не удалось загрузить политики Complete»** (`null`). |
+| **My PRs** (активные, не Draft) | Под карточкой: список Required **или** **«Готов к Complete»** (если Required пуст), затем блок **Optional** при наличии; либо **«Не удалось загрузить политики Complete»** (`null`). |
+| **My PRs** (Draft) | Policies не загружаются и не показываются. |
 | **My PRs** (Complete) | Policies не загружаются и не показываются. |
 
 Поля в элементе списка: **`blockingReasons`**, **`optionalPolicyReasons`**: `string[]` | `null` | отсутствует.
@@ -182,15 +184,16 @@
 
 Порядок в [`refreshPullRequests`](../background.mjs):
 
-1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для **ожидающих** PR на ревью (`filtered`, не `approved`):
+1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для **ожидающих** PR на ревью (`filtered`) и **WAITING FOR AUTHOR**:
    - **`GET .../pullrequests/{id}?includeCommits=true`**: полное `description`; **`lastCommitAt`** из push/commit (кэш);
-   - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system).
+   - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system);
+   - для WAITING FOR AUTHOR из тех же threads — время последнего голоса Waiting for the author; оно же становится нижней границей «есть обновления», если позже комментария группы.
 
-2. **Review (ожидающие) и My PRs (активные)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
+2. **Review (ожидающие) и My PRs (активные не-draft)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
 
-3. **Review (ожидающие) и My PRs (активные)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
+3. **Review (ожидающие) и My PRs (активные, включая черновики)** — [`attachPullRequestConflictInfo`](../ado-api.mjs) → `conflictText` при `mergeStatus === conflicts` (см. раздел «Конфликты слияния»).
 
-Завершённые PR на My PRs (Complete) и одобренные PR на Review (APPROVED) этим пайплайном **не** проходят — только list + `mapPullRequestToItem`.
+Завершённые PR на My PRs (Complete) и одобренные PR на Review (APPROVED) этим пайплайном **не** проходят — только list + `mapPullRequestToItem`. WAITING FOR AUTHOR проходит last-commit/threads, но **без** Policies и конфликтов. Черновики на My PRs проходят конфликты, но не Policies.
 
 В элементе для UI ([`mapPullRequestToItem`](../ado-api.mjs)):
 
@@ -198,7 +201,8 @@
 - **`createdAt`** = дата создания PR;
 - **`closedAt`** = дата закрытия (`closedDate`), если есть;
 - **`status`** — `active` / `abandoned` / `completed` / `unknown`;
-- **`lastCommitAt`**, **`lastGroupCommentAt`** — ISO-даты (в основном на Review; для рабочего времени);
+- **`isDraft`** — `true` у черновиков на вкладке My PRs (иначе поле отсутствует);
+- **`lastCommitAt`**, **`lastGroupCommentAt`**, **`lastWaitingForAuthorAt`** — ISO-даты (в основном на Review; для рабочего времени; `lastWaitingForAuthorAt` — у WAITING FOR AUTHOR);
 - **`targetBranch`** — целевая ветка (на My PRs);
 - **`blockingReasons`** — проблемы Required Policies;
 - **`optionalPolicyReasons`** — проблемы Optional Policies;
@@ -209,10 +213,11 @@
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
 - `items` — массив элементов вкладки **Review** (ожидающие ревью): `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
-- `count` — число PR из `items`, **ожидающих ревью** (`hasUpdatesAfterLastGroupComment`); группа **NO CHANGES** и **APPROVED** не входят. Влияет на badge toolbar и счётчик popup на вкладке Review;
+- `count` — число PR из `items`, **ожидающих ревью** (`hasUpdatesAfterLastGroupComment`); группы **NO CHANGES**, **WAITING FOR AUTHOR** и **APPROVED** не входят. Влияет на badge toolbar и счётчик popup на вкладке Review;
+- `waitingForAuthorItems` — массив PR вкладки **Review** со статусом Waiting for the author (`vote === -5`; с last-commit/threads, без политик и конфликтов); в badge и уведомления **не** входят;
 - `approvedItems` — массив уже одобренных PR вкладки **Review** (без политик, конфликтов и last-commit enrichment); в badge и уведомления **не** входят;
-- `myItems` — массив **активных** элементов вкладки **My PRs**: те же базовые поля плюс `targetBranch`, `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`;
-- `myCount` — длина `myItems` (только активные; Complete в storage не кэшируются);
+- `myItems` — массив **активных** элементов вкладки **My PRs** (включая черновики): те же базовые поля плюс `targetBranch`, у не-draft — `blockingReasons` / `optionalPolicyReasons` (`string[]` или `null` при ошибке загрузки политик), при конфликтах — `conflictText`, у черновиков — `isDraft: true`;
+- `myCount` — длина `myItems` (активные, включая черновики; Complete в storage не кэшируются);
 - `matchedSectionTitle` — служебное поле фильтра (заголовок секции совпадения, если используется);
 - `lastCheckedAt` — ISO-время последней попытки обновления;
 - `lastSuccessAt` — ISO-время последнего **успешного** обновления;
@@ -220,7 +225,7 @@
 - `lastError` — текст ошибки или `null`;
 - `previousItemIds` — id из последнего успешного списка **Review** — для детекта **новых** PR и показа уведомлений.
 
-При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` / `approvedItems` / `myItems` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
+При ошибке API: **иконка** `icon-*-error.png`, **badge** пустой, в `prState` пишется ошибка; **предыдущий успешный список в `items` / `waitingForAuthorItems` / `approvedItems` / `myItems` не подменяется** на пустой в ветке catch (сохраняется прошлое состояние кроме полей ошибки/времени — см. `refreshPullRequests`).
 
 ## Рабочее время и срочность
 
@@ -236,6 +241,8 @@
 | есть комментарий, но нет `lastCommitAt` | нет |
 | `lastCommitAt` **строго позже** `lastGroupCommentAt` | да — автор допушил после комментария |
 | иначе | нет — группа уже ответила, новых пушей нет |
+
+Для **WAITING FOR AUTHOR** в `lastGroupCommentAt` также попадает время голоса Waiting for the author, если оно позже комментария группы: «Нет обновлений» только когда после этого голоса новых пушей нет.
 
 **Точка отсчёта** рабочего времени — [`getItemWorkingTimeFrom(item)`](../working-time.mjs):
 
@@ -257,7 +264,7 @@ PR без ожидания ревью **не участвуют** в расчё�
 
 ### Сортировка списка
 
-[`sortPullRequestsOldestFirst`](../working-time.mjs): PR с ожиданием ревью — выше, внутри группы **старые по `updatedAt` выше**; PR без новых обновлений после комментария группы — **в конце**, в popup под заголовком **NO CHANGES**. Сортировка выполняется в фоне при сохранении `prState` и повторно в popup при отрисовке.
+[`sortPullRequestsOldestFirst`](../working-time.mjs): PR с ожиданием ревью — выше, внутри группы **старые по `updatedAt` выше**; PR без новых обновлений после комментария группы — в popup под заголовком **NO CHANGES** (после **WAITING FOR AUTHOR**, до **APPROVED**). Сортировка `items` выполняется в фоне при сохранении `prState` и повторно в popup при отрисовке.
 
 ### Иконка и badge на панели Chrome
 
@@ -301,9 +308,9 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 ## Popup ([`popup.mjs`](../popup.mjs), [`popup.css`](../popup.css))
 
 - Ширина документа: **600px**.
-- Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (при **0** — зелёный фон, иначе серый; скрывается при ошибке). На **Review** — только PR, ожидающие ревью (без **NO CHANGES** и **APPROVED**); на **My PRs** — `myCount` (только активные). Отступ от заголовка до вкладок — **16px**.
+- Верх: заголовок; справа — время последней проверки (сегодня только время, иначе дата+время), кнопка обновления, **счётчик** PR на **активной вкладке** (при **0** — зелёный фон, иначе серый; скрывается при ошибке). На **Review** — только PR, ожидающие ревью (без **NO CHANGES**, **WAITING FOR AUTHOR** и **APPROVED**); на **My PRs** — `myCount` (активные, включая черновики). Отступ от заголовка до вкладок — **16px**.
 - Вкладки **Review** / **My PRs** (выбор хранится в `chrome.storage.session` на сессию браузера).
-- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы (если нет ни ожидающих, ни одобренных); пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
+- Середина: **прокручиваемый** список PR; при ошибке — текст сообщения; пустой Review — текст про reviewer-группы (если нет ни ожидающих, ни Waiting for the author, ни одобренных); пустой My PRs — «Нет ваших активных pull requests» (если нет ни активных, ни Complete).
 - Низ: **футер** (сетка 3 колонки) — слева ссылка **GitHub**, по центру (если `prUpdateState.hasUpdate`) чип **«Новая версия — X.Y»**, справа **«Настройки подключения»** (`chrome.runtime.openOptionsPage()`).
 - Высота колонки попапа ограничивается CSS-переменной **`--popup-max-height`**, выставляемой скриптом как **половина `screen.availHeight`** (fallback `innerHeight`), плюс слушатель `resize`.
 
@@ -319,9 +326,17 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 - **конфликты** — бейдж **«конфликт»** (см. раздел «Конфликты слияния»);
 - для PR с текстом описания, совпадающим с эвристикой «тех ПР» — бейдж **ТЕХ ПР** и кнопка **Approve** (отправка сообщения в background).
 
+Карточка PR (**Review**, Waiting for the author):
+
+- сразу после PR, ожидающих ревью, под заголовком **WAITING FOR AUTHOR** (выше **NO CHANGES** и **APPROVED**);
+- если после голоса Waiting for the author автор допушил — **обычный** стиль карточки, в метаданных рабочее время с последнего пуша (с чипом срочности);
+- если новых пушей нет — стиль неактивных (`popup__item--no-updates`) и **«Нет обновлений»**;
+- без Policies, конфликтов, бейджа **ТЕХ ПР** и кнопки **Approve**;
+- не входят в счётчик вкладки и badge toolbar.
+
 Карточка PR (**Review**, одобренные):
 
-- ниже групп ожидающих и **NO CHANGES**, под заголовком **APPROVED**;
+- ниже групп ожидающих, **WAITING FOR AUTHOR** и **NO CHANGES**, под заголовком **APPROVED**;
 - стиль как у неактивных (`popup__item--no-updates`); в метаданных — **«Нет обновлений»**;
 - без срочности, Policies, конфликтов, бейджа **ТЕХ ПР** и кнопки **Approve**;
 - не входят в счётчик вкладки и badge toolbar.
@@ -330,8 +345,9 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 
 - клик по заголовку — как в Review;
 - под заголовком: целевая ветка (`→ master`) и дата создания;
-- **Policies** — список под карточкой (см. раздел «Policies»);
+- **Policies** — список под карточкой (см. раздел «Policies»); у черновиков Policies нет;
 - **конфликты** — бейдж в строке метаданных (см. раздел «Конфликты слияния»);
+- у черновиков — бейдж **Draft**;
 - иконка Storybook и описание по иконке — как в Review; Approve / ТЕХ ПР на этой вкладке не показываются.
 
 Карточка PR (**My PRs**, Complete):

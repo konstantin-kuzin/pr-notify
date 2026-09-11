@@ -161,7 +161,7 @@ export function hasUpdatesAfterLastGroupComment(item) {
 }
 
 /**
- * Число PR для общего счётчика Review: только ожидающие ревью, без NO CHANGES.
+ * Число PR для общего счётчика Review: только ожидающие ревью, без NO CHANGES / WAITING FOR AUTHOR / APPROVED.
  * @param {Array<{ lastCommitAt?: string, lastGroupCommentAt?: string }>|null|undefined} items
  * @returns {number}
  */
