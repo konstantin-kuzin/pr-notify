@@ -265,6 +265,7 @@ function render() {
 
   lastUpdated.textContent = formatLastCheckedAt(currentState.lastCheckedAt);
   refreshButton.disabled = isRefreshing;
+  refreshButton.classList.toggle("popup__refresh--busy", isRefreshing);
   refreshButton.setAttribute(
     "aria-label",
     isRefreshing ? "Обновление выполняется" : "Обновить сейчас",
