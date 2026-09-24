@@ -155,9 +155,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === LOAD_PR_IM_REMINDERS_MESSAGE_TYPE) {
-    void loadPullRequestImReminders(message?.pullRequestId)
-      .then((commenters) => {
-        sendResponse({ ok: true, commenters });
+    void loadPullRequestImReminders(message?.pullRequestId, message?.creatorId)
+      .then((payload) => {
+        sendResponse({ ok: true, ...payload });
       })
       .catch((error) => {
         sendResponse({
@@ -568,8 +568,9 @@ async function loadMyCompletedPullRequests(options = {}) {
  * Комментаторы активного PR кроме автора — для ручного пинга в IM.
  *
  * @param {unknown} pullRequestId
+ * @param {unknown} [creatorId]
  */
-async function loadPullRequestImReminders(pullRequestId) {
+async function loadPullRequestImReminders(pullRequestId, creatorId) {
   const normalizedPullRequestId = normalizePullRequestId(pullRequestId);
 
   if (!normalizedPullRequestId) {
@@ -584,8 +585,10 @@ async function loadPullRequestImReminders(pullRequestId) {
   }
 
   const identity = await fetchConnectionIdentity(config);
-  const myCreatorId = MY_TAB_CREATOR_OVERRIDE_ID || identity.id;
-  return listPullRequestImReminders(config, normalizedPullRequestId, myCreatorId);
+  const excludeUserId = String(creatorId ?? "").trim()
+    || MY_TAB_CREATOR_OVERRIDE_ID
+    || identity.id;
+  return listPullRequestImReminders(config, normalizedPullRequestId, excludeUserId);
 }
 
 function normalizePullRequestId(pullRequestId) {

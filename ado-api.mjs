@@ -1738,6 +1738,75 @@ function collectPullRequestCommentAuthors(threads, currentUserId) {
 }
 
 /**
+ * Незарезолвленный тред: Active / Pending (и пустой статус).
+ *
+ * @param {any} thread
+ */
+function isUnresolvedCommentThread(thread) {
+  if (!thread || thread.isDeleted === true) {
+    return false;
+  }
+
+  const status = thread.status ?? thread.Status;
+
+  if (status == null || status === "") {
+    return true;
+  }
+
+  if (typeof status === "number") {
+    return status === 1 || status === 6;
+  }
+
+  const normalized = String(status).toLowerCase();
+  return normalized === "active" || normalized === "pending" || normalized === "unknown";
+}
+
+/**
+ * Авторы человеческих комментариев в незарезолвленных тредах, кроме текущего пользователя.
+ *
+ * @param {Array<any>} threads
+ * @param {string} currentUserId
+ */
+function collectActiveCommentAuthors(threads, currentUserId) {
+  const myId = normalizePlainText(currentUserId);
+
+  if (!myId || !Array.isArray(threads)) {
+    return [];
+  }
+
+  /** @type {Map<string, ReturnType<typeof mapThreadCommentAuthor>>} */
+  const byId = new Map();
+
+  for (const thread of threads) {
+    if (!isUnresolvedCommentThread(thread)) {
+      continue;
+    }
+
+    const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+
+    for (const comment of comments) {
+      if (!isUserPullRequestComment(comment)) {
+        continue;
+      }
+
+      const authorId = getCommentAuthorId(comment);
+
+      if (!authorId || authorId === myId || byId.has(authorId)) {
+        continue;
+      }
+
+      const mapped = mapThreadCommentAuthor(comment);
+
+      if (mapped) {
+        byId.set(authorId, mapped);
+      }
+    }
+  }
+
+  return [...byId.values()];
+}
+
+/**
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {Array<{ id: string, email: string, imUsername: string, uniqueName: string }>} people
  */
@@ -1786,18 +1855,27 @@ async function attachImUsernames(config, people) {
 }
 
 /**
- * Комментаторы PR кроме автора — список для ручного напоминания в IM.
+ * Комментаторы PR кроме автора и авторы незарезолвленных тредов — для напоминания в IM.
  *
  * @param {import("./ado-config.mjs").DEFAULT_ADO_CONFIG} config
  * @param {string | number} pullRequestId
  * @param {string} currentUserId
- * @returns {Promise<Array<{
- *   id: string,
- *   displayName: string,
- *   uniqueName: string,
- *   email: string,
- *   imUsername: string,
- * }>>}
+ * @returns {Promise<{
+ *   commenters: Array<{
+ *     id: string,
+ *     displayName: string,
+ *     uniqueName: string,
+ *     email: string,
+ *     imUsername: string,
+ *   }>,
+ *   activeCommentAuthors: Array<{
+ *     id: string,
+ *     displayName: string,
+ *     uniqueName: string,
+ *     email: string,
+ *     imUsername: string,
+ *   }>,
+ * }>}
  */
 export async function listPullRequestImReminders(config, pullRequestId, currentUserId) {
   const prId = String(pullRequestId ?? "").trim();
@@ -1813,17 +1891,23 @@ export async function listPullRequestImReminders(config, pullRequestId, currentU
     prId,
   );
   const commenters = collectPullRequestCommentAuthors(threads, currentUserId);
+  const activeCommentAuthors = collectActiveCommentAuthors(threads, currentUserId);
 
   try {
-    await attachImUsernames(config, commenters);
+    await attachImUsernames(config, [...commenters, ...activeCommentAuthors]);
   } catch (error) {
     logAdoError(`attachImUsernames ${prId}`, error);
   }
 
-  return commenters.sort((left, right) => {
-    const byName = left.displayName.localeCompare(right.displayName, "ru", { sensitivity: "base" });
-    return byName || left.id.localeCompare(right.id);
-  });
+  const byName = (left, right) => {
+    const nameOrder = left.displayName.localeCompare(right.displayName, "ru", { sensitivity: "base" });
+    return nameOrder || left.id.localeCompare(right.id);
+  };
+
+  return {
+    commenters: commenters.sort(byName),
+    activeCommentAuthors: activeCommentAuthors.sort(byName),
+  };
 }
 
 /**
@@ -2924,6 +3008,7 @@ export function mapPullRequestToItem(pr, config) {
     id,
     title,
     author,
+    creatorId: normalizePlainText(pr?.createdBy?.id ?? pr?.createdBy?.Id),
     avatarUrl,
     createdAt,
     updatedAt,

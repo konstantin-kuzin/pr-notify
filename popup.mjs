@@ -93,7 +93,7 @@ let myCompletedHasMore = false;
 let myCompletedLoaded = false;
 let isLoadingMyCompleted = false;
 let myCompletedError = "";
-/** @type {Map<string, { status: "loading" | "ready" | "error", commenters?: Array<{ id: string, displayName: string, imUsername: string }>, error?: string }>} */
+/** @type {Map<string, { status: "loading" | "ready" | "error", commenters?: Array<{ id: string, displayName: string, imUsername: string }>, activeCommentAuthors?: Array<{ id: string, displayName: string, imUsername: string }>, error?: string }>} */
 const imRemindersByPrId = new Map();
 /** @type {Map<string, Promise<void>>} */
 const imRemindersPromises = new Map();
@@ -664,7 +664,7 @@ function createItemElement(item, options = {}) {
   /** @type {{ icon: HTMLElement, section: HTMLElement } | null} */
   let imRemindUi = null;
 
-  if (mode === TAB_MY && !isCompleted && !isDraft) {
+  if (item?.id) {
     imRemindUi = createImRemindToggle(item);
     authorRow.append(imRemindUi.icon);
   }
@@ -1130,7 +1130,7 @@ async function copyTextToClipboard(text) {
 }
 
 /**
- * Иконка IM в строке метаданных My PRs: раскрывает список комментаторов.
+ * Иконка IM в строке метаданных: раскрывает список для напоминания.
  *
  * @param {any} item
  * @returns {{ icon: HTMLSpanElement, section: HTMLDivElement }}
@@ -1324,7 +1324,13 @@ async function openImReminderChat(item, username) {
  * @param {any} item
  */
 async function openImContributeChat(item) {
-  const draft = buildImContributeDraft(item);
+  await ensureImRemindersLoaded(item, () => {});
+  const cached = imRemindersByPrId.get(String(item.id));
+  const draft = buildImContributeDraft(item, {
+    activeCommentAuthors: Array.isArray(cached?.activeCommentAuthors)
+      ? cached.activeCommentAuthors
+      : [],
+  });
   const copied = copyTextToClipboard(draft.text);
   openImHexaUiContributeChannel();
   await copied;
@@ -1362,6 +1368,7 @@ async function ensureImRemindersLoaded(item, onUpdate) {
         const response = await chrome.runtime.sendMessage({
           type: LOAD_PR_IM_REMINDERS_MESSAGE_TYPE,
           pullRequestId: id,
+          creatorId: item.creatorId,
         });
 
         if (!response?.ok) {
@@ -1371,6 +1378,9 @@ async function ensureImRemindersLoaded(item, onUpdate) {
         imRemindersByPrId.set(id, {
           status: "ready",
           commenters: Array.isArray(response.commenters) ? response.commenters : [],
+          activeCommentAuthors: Array.isArray(response.activeCommentAuthors)
+            ? response.activeCommentAuthors
+            : [],
         });
       } catch (error) {
         imRemindersByPrId.set(id, {

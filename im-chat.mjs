@@ -109,42 +109,55 @@ export function buildImReminderDraft(item) {
 }
 
 /**
- * Черновик в канал Hexa UI Contribute: ссылка на PR, группы без финального апрува
- * и @логины людей со статусом Waiting for the author.
+ * Черновик в канал Hexa UI Contribute: ссылка на PR, группы без финального апрува,
+ * @логины Waiting for the author и авторы незарезолвленных комментариев.
  *
  * @param {any} item
+ * @param {{ activeCommentAuthors?: Array<{ id?: string, imUsername?: string, displayName?: string }> }} [options]
  * @returns {{ text: string, url: string, linkLabel: string, title: string }}
  */
-export function buildImContributeDraft(item) {
+export function buildImContributeDraft(item, options = {}) {
   const { url, linkLabel, title, line } = buildImPullRequestLine(item);
   const groups = Array.isArray(item?.pendingReviewerGroupNames)
     ? item.pendingReviewerGroupNames.map((name) => String(name ?? "").trim()).filter(Boolean)
     : [];
-  const mentions = uniqueNonEmpty(
+  const activeCommentAuthors = Array.isArray(options.activeCommentAuthors)
+    ? options.activeCommentAuthors
+    : [];
+  const waitingMentions = uniqueNonEmpty(
     Array.isArray(item?.waitingForAuthorReviewers)
-      ? item.waitingForAuthorReviewers.map(formatImMentionLine)
+      ? item.waitingForAuthorReviewers.map((person) => {
+        return formatImMentionLine(person, "Status «Waiting for the author»");
+      })
       : [],
+  );
+  const activeMentions = uniqueNonEmpty(
+    activeCommentAuthors.map((person) => formatImMentionLine(person, "Unresolved comments")),
   );
 
   return {
     url,
     linkLabel,
     title,
-    text: [line, ...groups, ...mentions].filter(Boolean).join("\n").trim(),
+    text: [line, ...groups, ...waitingMentions, ...activeMentions].filter(Boolean).join("\n").trim(),
   };
 }
 
 /**
  * @param {{ imUsername?: string, displayName?: string }} person
+ * @param {string} [note]
  */
-function formatImMentionLine(person) {
+function formatImMentionLine(person, note) {
   const username = typeof person?.imUsername === "string" ? person.imUsername.trim() : "";
+  const displayName = String(person?.displayName ?? "").trim();
+  const name = username ? `@${username}` : (displayName ? `@${displayName}` : "");
 
-  if (username) {
-    return `@${username}`;
+  if (!name) {
+    return "";
   }
 
-  return String(person?.displayName ?? "").trim();
+  const suffix = String(note ?? "").trim();
+  return suffix ? `${name} (${suffix})` : name;
 }
 
 /**
