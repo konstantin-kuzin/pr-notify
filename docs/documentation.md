@@ -187,7 +187,8 @@
 
 1. **Review only** — [`attachPullRequestLastCommitTimes`](../ado-api.mjs) для **ожидающих** PR на ревью (`filtered`) и **WAITING FOR AUTHOR**:
    - **`GET .../pullrequests/{id}?includeCommits=true`**: полное `description`; **`lastCommitAt`** из push/commit (кэш);
-   - если есть участники групп — **`GET .../threads`**, **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system);
+   - **`GET .../threads`**: **`publishedFromDraftAt`** — последняя публикация из черновика (системный тред `IsDraftUpdate` / «published the pull request»; перевод обратно в черновик не берётся);
+   - если есть участники групп — из тех же threads **`lastGroupCommentAt`** (открывающий тред комментарий участника группы, не system);
    - для WAITING FOR AUTHOR из тех же threads — время последнего голоса Waiting for the author; оно же становится нижней границей «есть обновления», если позже комментария группы.
 
 2. **Review (ожидающие) и My PRs (активные не-draft)** — [`attachPullRequestBlockingReasons`](../ado-api.mjs) → `blockingReasons` / `optionalPolicyReasons` (см. раздел «Policies»).
@@ -198,12 +199,12 @@
 
 В элементе для UI ([`mapPullRequestToItem`](../ado-api.mjs)):
 
-- **`updatedAt`** = max(`lastGroupCommentAt`, `lastCommitAt`, `closedAt`, `createdAt`) — для **сортировки** и метаданных (на My PRs без enrichment commit-полей обычно = `createdAt` / `closedAt`);
+- **`updatedAt`** = max(`lastGroupCommentAt`, `lastCommitAt`, `publishedFromDraftAt`, `closedAt`, `createdAt`) — для **сортировки** и метаданных (на My PRs без enrichment commit-полей обычно = `createdAt` / `closedAt`);
 - **`createdAt`** = дата создания PR;
 - **`closedAt`** = дата закрытия (`closedDate`), если есть;
 - **`status`** — `active` / `abandoned` / `completed` / `unknown`;
 - **`isDraft`** — `true` у черновиков на вкладке My PRs (иначе поле отсутствует);
-- **`lastCommitAt`**, **`lastGroupCommentAt`**, **`lastWaitingForAuthorAt`** — ISO-даты (в основном на Review; для рабочего времени; `lastWaitingForAuthorAt` — у WAITING FOR AUTHOR);
+- **`lastCommitAt`**, **`publishedFromDraftAt`**, **`lastGroupCommentAt`**, **`lastWaitingForAuthorAt`** — ISO-даты (в основном на Review; для рабочего времени; `publishedFromDraftAt` — момент публикации из черновика, приоритетнее `createdAt`; `lastWaitingForAuthorAt` — у WAITING FOR AUTHOR);
 - **`targetBranch`** — целевая ветка (на My PRs);
 - **`blockingReasons`** — проблемы Required Policies;
 - **`optionalPolicyReasons`** — проблемы Optional Policies;
@@ -213,7 +214,7 @@
 
 [`background.mjs`](../background.mjs) сохраняет объект (см. `DEFAULT_STATE`):
 
-- `items` — массив элементов вкладки **Review** (ожидающие ревью): `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
+- `items` — массив элементов вкладки **Review** (ожидающие ревью): `id`, `title`, `author`, `avatarUrl`, `createdAt`, `updatedAt`, `status`, `lastCommitAt`, `publishedFromDraftAt`, `lastGroupCommentAt`, `description`, `url`, при проблемах Policies — `blockingReasons` / `optionalPolicyReasons`, при конфликтах слияния — `conflictText`;
 - `count` — число PR из `items`, **ожидающих ревью** (`hasUpdatesAfterLastGroupComment`); группы **NO CHANGES**, **WAITING FOR AUTHOR** и **APPROVED** не входят. Влияет на badge toolbar и счётчик popup на вкладке Review;
 - `waitingForAuthorItems` — массив PR вкладки **Review** со статусом Waiting for the author (`vote === -5`; с last-commit/threads, без политик и конфликтов); в badge и уведомления **не** входят;
 - `approvedItems` — массив уже одобренных PR вкладки **Review** (без политик, конфликтов и last-commit enrichment); в badge и уведомления **не** входят;
@@ -239,17 +240,17 @@
 | Условие | Ожидание ревью |
 |---------|----------------|
 | `lastGroupCommentAt` отсутствует | да — открывающего тред комментария группы ещё не было |
-| есть комментарий, но нет `lastCommitAt` | нет |
-| `lastCommitAt` **строго позже** `lastGroupCommentAt` | да — автор допушил после комментария |
-| иначе | нет — группа уже ответила, новых пушей нет |
+| есть комментарий, но нет ни `lastCommitAt`, ни `publishedFromDraftAt` | нет |
+| более позднее из `lastCommitAt` и `publishedFromDraftAt` **строго позже** `lastGroupCommentAt` | да — автор допушил или опубликовал PR из черновика после комментария |
+| иначе | нет — группа уже ответила, новых пушей и публикации нет |
 
-Для **WAITING FOR AUTHOR** в `lastGroupCommentAt` также попадает время голоса Waiting for the author, если оно позже комментария группы: «Нет обновлений» только когда после этого голоса новых пушей нет.
+Для **WAITING FOR AUTHOR** в `lastGroupCommentAt` также попадает время голоса Waiting for the author, если оно позже комментария группы: «Нет обновлений» только когда после этого голоса нет ни нового пуша, ни публикации из черновика.
 
 **Точка отсчёта** рабочего времени — [`getItemWorkingTimeFrom(item)`](../working-time.mjs):
 
 - если PR **не** ожидает ревью → `null` (счётчик не ведётся);
-- если есть и комментарий группы, и пуш → от **`lastCommitAt`** (момент последнего пуша после комментария);
-- иначе → **`lastCommitAt ?? createdAt`**.
+- иначе → более позднее из **`publishedFromDraftAt`** и **`lastCommitAt`** (публикация из черновика важнее даты создания и пуша, сделанного ещё в черновике; пуш после публикации сдвигает отсчёт на этот пуш);
+- если обоих нет → **`createdAt`**.
 
 От этой точки до **`lastCheckedAt`** считаются **рабочие минуты** ([`getWorkingElapsedMinutes`](../working-time.mjs)).
 
@@ -318,8 +319,8 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 Карточка PR (**Review**):
 
 - клик по заголовку открывает PR в новой вкладке и закрывает popup;
-- если новых пушей после последнего комментария группы нет — карточка в группе **NO CHANGES**, стиль неактивных (`popup__item--no-updates`); в счётчик вкладки и badge toolbar **не** входят;
-- под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если новых пушей после комментария группы нет — текст **«Нет обновлений»** (без цветного чипа);
+- если после последнего комментария группы нет ни нового пуша, ни публикации из черновика — карточка в группе **NO CHANGES**, стиль неактивных (`popup__item--no-updates`); в счётчик вкладки и badge toolbar **не** входят;
+- под заголовком: автор и **относительное рабочее время** (`N мин` / `H ч M мин`) от точки [`getItemWorkingTimeFrom`](../working-time.mjs) до `lastCheckedAt`; если после комментария группы нет ни нового пуша, ни публикации из черновика — текст **«Нет обновлений»** (без цветного чипа);
 - фрагмент времени — **чип** при **> 6 / > 8 / > 16** рабочих ч (жёлтый / оранжевый / красный); пороги — [`working-time.mjs`](../working-time.mjs);
 - иконка **Storybook** (слева от иконки описания) открывает `https://storybook.s1.ksc-web.avp.ru/hexa-ui/<id PR>/` в новой вкладке и закрывает popup; **скрывается**, если есть конфликты слияния или в Policies есть `[OSMP] Storybook Hexa UI deploy for Review expired`;
 - при наличии описания — иконка раскрывает **панель под карточкой** с **упрощённым markdown** (заголовки **h1–h6**, списки, ссылки, код, жирный/курсив, картинки по `http(s)`; разбор скобок в URL картинок с балансом `()`);
@@ -331,7 +332,7 @@ Popup читает `hasUpdate` и `latestVersion`, показывает чип *
 
 - сразу после PR, ожидающих ревью, под заголовком **WAITING FOR AUTHOR** (выше **NO CHANGES** и **APPROVED**);
 - если после голоса Waiting for the author автор допушил — **обычный** стиль карточки, в метаданных рабочее время с последнего пуша (с чипом срочности);
-- если новых пушей нет — стиль неактивных (`popup__item--no-updates`) и **«Нет обновлений»**;
+- если нет ни нового пуша, ни публикации из черновика — стиль неактивных (`popup__item--no-updates`) и **«Нет обновлений»**;
 - без Policies, конфликтов, бейджа **ТЕХ ПР** и кнопки **Approve**;
 - не входят в счётчик вкладки и badge toolbar.
 

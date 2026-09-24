@@ -96,7 +96,7 @@ options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 
 - **Отбор PR:** [`ado-api.mjs`](ado-api.mjs) — `filterPullRequestsForExtension` (ожидающие + Waiting for the author + одобренные), `getExtensionReviewerContext`, `filterMyPullRequests`, `listCompletedPullRequestsByCreator`.
 - **Обогащение PR** (commits, group comments, Policies, conflicts, `updatedAt`): `attachPullRequestLastCommitTimes`, `attachPullRequestBlockingReasons`, `attachPullRequestConflictInfo`, `mapPullRequestToItem`.
-- **Рабочее время и срочность:** [`working-time.mjs`](working-time.mjs) — пороги 6 / 8 / 16 рабочих часов; точка отсчёта от `lastCommitAt` с учётом комментариев группы; сортировка «ожидающие ревью» выше.
+- **Рабочее время и срочность:** [`working-time.mjs`](working-time.mjs) — пороги 6 / 8 / 16 рабочих часов; точка отсчёта — более позднее из `publishedFromDraftAt` и `lastCommitAt` (иначе `createdAt`), с учётом комментариев группы; сортировка «ожидающие ревью» выше.
 - **Approve (vote: 10):** сообщение `approve-pull-request` в [`background.mjs`](background.mjs), REST в `ado-api.mjs`.
 - **Complete на My PRs PRs:** сообщение `load-my-completed-pull-requests` в [`background.mjs`](background.mjs) / [`popup.mjs`](popup.mjs).
 - **Напоминание в IM:** сообщение `load-pr-im-reminders` — треды PR, чипы имён; первым чип канала Hexa UI Contribute (ссылка на PR, группы без апрува и @логины Waiting for the author). Popup копирует черновик и открывает чат в десктопном Squadus (`squadus://…`, без вкладки браузера и без автоотправки).

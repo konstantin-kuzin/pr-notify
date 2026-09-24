@@ -6,6 +6,9 @@ import {
 const PAGE_SIZE = 100;
 const MAX_RETRIES = 2;
 const RETRY_BASE_MS = 900;
+const MAX_CONCURRENT_FETCHES = 4;
+let activeFetches = 0;
+const fetchWaiters = [];
 const IDENTITY_BATCH_SIZE = 40;
 const REVIEWER_GROUPS_CACHE_TTL_MS = 5 * 60 * 1000;
 const GROUP_MEMBER_IDS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -54,42 +57,67 @@ export async function adoFetch(config, pathAndQuery, init = {}) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const response = await fetch(url, {
-      ...init,
-      headers,
-      credentials: config.authMode === "session" ? "include" : "omit",
-      cache: "no-store",
-    });
-
-    if (response.status === 429 && attempt < MAX_RETRIES) {
-      await delay(RETRY_BASE_MS * 2 ** attempt);
-      continue;
-    }
-
-    if (!response.ok) {
-      lastError = await buildAdoHttpError(response);
-      break;
-    }
-
-    if (response.status === 204) {
-      return null;
-    }
-
-    const text = await response.text();
-
-    if (!text) {
-      return null;
-    }
-
     try {
-      return JSON.parse(text);
-    } catch (_error) {
-      lastError = new Error("Ответ API не является JSON.");
-      break;
+      return await withFetchSlot(() => readAdoResponse(url, init, headers, config));
+    } catch (error) {
+      if (error instanceof AdoHttpError) {
+        throw error.error;
+      }
+
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      if (attempt < MAX_RETRIES) {
+        await delay(RETRY_BASE_MS * 2 ** attempt);
+        continue;
+      }
     }
   }
 
-  throw lastError ?? new Error("Запрос к Azure DevOps не выполнен.");
+  const detail = lastError instanceof Error ? lastError.message : String(lastError ?? "");
+  throw new Error(detail ? `${detail} (${pathAndQuery.split("?")[0]})` : "Запрос к Azure DevOps не выполнен.");
+}
+
+class AdoHttpError extends Error {
+  /**
+   * @param {Error} error
+   */
+  constructor(error) {
+    super(error.message);
+    this.error = error;
+  }
+}
+
+async function readAdoResponse(url, init, headers, config) {
+  const response = await fetch(url, {
+    ...init,
+    headers,
+    credentials: config.authMode === "session" ? "include" : "omit",
+    cache: "no-store",
+  });
+
+  if (response.status === 429) {
+    throw new Error("Слишком много запросов (429): повторите позже.");
+  }
+
+  if (!response.ok) {
+    throw new AdoHttpError(await buildAdoHttpError(response));
+  }
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  const text = await response.text();
+
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    throw new AdoHttpError(new Error("Ответ API не является JSON."));
+  }
 }
 
 async function buildAdoHttpError(response) {
@@ -155,6 +183,33 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function withFetchSlot(run) {
+  const execute = () => Promise.resolve().then(run);
+
+  if (activeFetches < MAX_CONCURRENT_FETCHES) {
+    activeFetches += 1;
+    return execute().finally(releaseFetchSlot);
+  }
+
+  return new Promise((resolve, reject) => {
+    fetchWaiters.push({ resolve, reject, run: execute });
+  });
+}
+
+function releaseFetchSlot() {
+  const next = fetchWaiters.shift();
+
+  if (!next) {
+    activeFetches -= 1;
+    return;
+  }
+
+  Promise.resolve()
+    .then(next.run)
+    .then(next.resolve, next.reject)
+    .finally(releaseFetchSlot);
 }
 
 /**
@@ -1426,6 +1481,83 @@ function readAdoPropertyValue(container, key) {
   return normalizePlainText(raw);
 }
 
+function readDraftNowSetFlag(thread, comment) {
+  return (
+    readAdoPropertyValue(thread, "CodeReviewIsDraftNowSet")
+    || readAdoPropertyValue(thread, "CodeReviewIsDraftUpdated")
+    || readAdoPropertyValue(comment, "CodeReviewIsDraftNowSet")
+    || readAdoPropertyValue(comment, "CodeReviewIsDraftUpdated")
+  ).toLowerCase();
+}
+
+function isMarkedAsDraftText(text) {
+  return text.includes("as a draft")
+    || text.includes("as draft")
+    || text.includes("черновик");
+}
+
+function isPublishedFromDraftText(text) {
+  return text.includes("published the pull request") || text.includes("опубликовал");
+}
+
+/**
+ * Последняя публикация PR из черновика: системный тред `IsDraftUpdate`
+ * (или текст «published the pull request»). Перевод обратно в черновик не учитывается.
+ *
+ * @param {Array<any>} threads
+ */
+function resolveLatestPublishedFromDraftAt(threads) {
+  if (!Array.isArray(threads)) {
+    return "";
+  }
+
+  /** @type {string[]} */
+  const dates = [];
+
+  for (const thread of threads) {
+    if (thread?.isDeleted === true) {
+      continue;
+    }
+
+    const comments = Array.isArray(thread?.comments) ? thread.comments : [];
+    const comment = comments[0];
+    const threadType = readAdoPropertyValue(thread, "CodeReviewThreadType").toLowerCase();
+    const text = comments
+      .map((entry) => normalizePlainText(entry?.content ?? entry?.Content))
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const isDraftUpdate = threadType === "isdraftupdate";
+    const publishedText = isPublishedFromDraftText(text);
+
+    if (!isDraftUpdate && !publishedText) {
+      continue;
+    }
+
+    const markedAsDraft = isMarkedAsDraftText(text) && !publishedText;
+    const draftNow = readDraftNowSetFlag(thread, comment);
+    const markedDraftFlag = draftNow === "true" || draftNow === "1" || draftNow === "yes";
+
+    if (markedAsDraft || markedDraftFlag) {
+      continue;
+    }
+
+    const publishedAt = normalizeIsoDate(
+      comment?.publishedDate
+      ?? comment?.PublishedDate
+      ?? thread?.publishedDate
+      ?? thread?.lastUpdatedDate
+      ?? "",
+    );
+
+    if (publishedAt) {
+      dates.push(publishedAt);
+    }
+  }
+
+  return pickLatestIsoDate(...dates) || "";
+}
+
 function isWaitingForAuthorVoteEvent(thread, comment) {
   const vote = Number(
     readAdoPropertyValue(thread, "CodeReviewVoteResult")
@@ -1714,7 +1846,6 @@ export async function attachPullRequestLastCommitTimes(
     : new Set(groupMemberIds ?? []);
   const captureWaitingForAuthorVote = options.captureWaitingForAuthorVote === true;
   const currentUserId = normalizePlainText(options.currentUserId);
-  const shouldFetchThreads = memberIds.size > 0 || captureWaitingForAuthorVote;
 
   return Promise.all(
     pullRequests.map(async (pullRequest) => {
@@ -1763,35 +1894,38 @@ export async function attachPullRequestLastCommitTimes(
           next.lastCommitAt = lastCommitAt;
         }
 
-        if (shouldFetchThreads) {
-          try {
-            const threads = await fetchGitPullRequestThreads(config, project, repo, prId);
+        try {
+          const threads = await fetchGitPullRequestThreads(config, project, repo, prId);
+          const publishedFromDraftAt = resolveLatestPublishedFromDraftAt(threads);
 
-            if (memberIds.size > 0) {
-              const lastGroupCommentAt = resolveLatestGroupMemberComment(threads, memberIds);
-
-              if (lastGroupCommentAt) {
-                next.lastGroupCommentAt = lastGroupCommentAt;
-              }
-            }
-
-            if (captureWaitingForAuthorVote) {
-              const lastWaitingForAuthorAt = resolveLatestWaitingForAuthorVoteAt(
-                threads,
-                [currentUserId, ...memberIds],
-              );
-
-              if (lastWaitingForAuthorAt) {
-                next.lastWaitingForAuthorAt = lastWaitingForAuthorAt;
-                next.lastGroupCommentAt = pickLatestIsoDate(
-                  next.lastGroupCommentAt,
-                  lastWaitingForAuthorAt,
-                ) || lastWaitingForAuthorAt;
-              }
-            }
-          } catch (error) {
-            logAdoError(`fetchGitPullRequestThreads ${prId}`, error);
+          if (publishedFromDraftAt) {
+            next.publishedFromDraftAt = publishedFromDraftAt;
           }
+
+          if (memberIds.size > 0) {
+            const lastGroupCommentAt = resolveLatestGroupMemberComment(threads, memberIds);
+
+            if (lastGroupCommentAt) {
+              next.lastGroupCommentAt = lastGroupCommentAt;
+            }
+          }
+
+          if (captureWaitingForAuthorVote) {
+            const lastWaitingForAuthorAt = resolveLatestWaitingForAuthorVoteAt(
+              threads,
+              [currentUserId, ...memberIds],
+            );
+
+            if (lastWaitingForAuthorAt) {
+              next.lastWaitingForAuthorAt = lastWaitingForAuthorAt;
+              next.lastGroupCommentAt = pickLatestIsoDate(
+                next.lastGroupCommentAt,
+                lastWaitingForAuthorAt,
+              ) || lastWaitingForAuthorAt;
+            }
+          }
+        } catch (error) {
+          logAdoError(`fetchGitPullRequestThreads ${prId}`, error);
         }
 
         return next;
@@ -2743,10 +2877,12 @@ export function mapPullRequestToItem(pr, config) {
   const createdAt = normalizeIsoDate(pr?.creationDate);
   const closedAt = normalizeIsoDate(pr?.closedDate);
   const status = normalizePullRequestStatus(pr?.status);
+  const publishedFromDraftAt = normalizeIsoDate(pr?.publishedFromDraftAt);
   const updatedAt = pickLatestIsoDate(
     normalizeIsoDate(pr?.lastGroupCommentAt),
     normalizeIsoDate(pr?.lastWaitingForAuthorAt),
     normalizeIsoDate(pr?.lastCommitAt),
+    publishedFromDraftAt,
     closedAt,
     createdAt,
   );
@@ -2793,6 +2929,7 @@ export function mapPullRequestToItem(pr, config) {
     updatedAt,
     status,
     lastCommitAt: normalizeIsoDate(pr?.lastCommitAt) || undefined,
+    publishedFromDraftAt: publishedFromDraftAt || undefined,
     lastGroupCommentAt: normalizeIsoDate(pr?.lastGroupCommentAt) || undefined,
     lastWaitingForAuthorAt: normalizeIsoDate(pr?.lastWaitingForAuthorAt) || undefined,
     description,

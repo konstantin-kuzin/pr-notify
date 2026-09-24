@@ -131,10 +131,32 @@ export function getWorkingTimeUrgency(minutes) {
 }
 
 /**
- * Есть ли коммиты/пуши позже последнего комментария участника группы.
+ * Момент, с которого PR снова на ревью: более позднее из пуша и публикации из черновика.
+ * Публикация важнее даты создания и пуша, сделанного ещё в черновике.
+ *
+ * @param {{ lastCommitAt?: string, publishedFromDraftAt?: string }} item
+ * @returns {string}
+ */
+function getReviewActivityAt(item) {
+  const commitAt = item?.lastCommitAt;
+  const publishedAt = item?.publishedFromDraftAt;
+  const commitTimestamp = Date.parse(commitAt ?? "");
+  const publishedTimestamp = Date.parse(publishedAt ?? "");
+  const hasCommit = Number.isFinite(commitTimestamp);
+  const hasPublished = Number.isFinite(publishedTimestamp);
+
+  if (hasPublished && (!hasCommit || publishedTimestamp >= commitTimestamp)) {
+    return publishedAt;
+  }
+
+  return hasCommit ? commitAt : "";
+}
+
+/**
+ * Есть ли пуш или публикация из черновика позже последнего комментария участника группы.
  * Без открывающего тред комментария группы считаем, что «ожидание ревью» — счётчик включается.
  *
- * @param {{ lastCommitAt?: string, lastGroupCommentAt?: string }} item
+ * @param {{ lastCommitAt?: string, publishedFromDraftAt?: string, lastGroupCommentAt?: string }} item
  * @returns {boolean}
  */
 export function hasUpdatesAfterLastGroupComment(item) {
@@ -144,20 +166,20 @@ export function hasUpdatesAfterLastGroupComment(item) {
     return true;
   }
 
-  const commitAt = item?.lastCommitAt;
+  const activityAt = getReviewActivityAt(item);
 
-  if (!commitAt) {
+  if (!activityAt) {
     return false;
   }
 
   const commentTimestamp = Date.parse(commentAt);
-  const commitTimestamp = Date.parse(commitAt);
+  const activityTimestamp = Date.parse(activityAt);
 
-  if (!Number.isFinite(commentTimestamp) || !Number.isFinite(commitTimestamp)) {
+  if (!Number.isFinite(commentTimestamp) || !Number.isFinite(activityTimestamp)) {
     return true;
   }
 
-  return commitTimestamp > commentTimestamp;
+  return activityTimestamp > commentTimestamp;
 }
 
 /**
@@ -175,8 +197,9 @@ export function countWaitingPullRequests(items) {
 
 /**
  * Точка отсчёта рабочего времени для PR или `null`, если счётчик не нужен.
+ * Приоритет: публикация из черновика и последний пуш (что позже), иначе дата создания.
  *
- * @param {{ lastCommitAt?: string, lastGroupCommentAt?: string, createdAt?: string }} item
+ * @param {{ lastCommitAt?: string, publishedFromDraftAt?: string, lastGroupCommentAt?: string, createdAt?: string }} item
  * @returns {string|null|undefined}
  */
 export function getItemWorkingTimeFrom(item) {
@@ -184,11 +207,7 @@ export function getItemWorkingTimeFrom(item) {
     return null;
   }
 
-  if (item?.lastGroupCommentAt && item?.lastCommitAt) {
-    return item.lastCommitAt;
-  }
-
-  return item?.lastCommitAt ?? item?.createdAt;
+  return getReviewActivityAt(item) || item?.createdAt || null;
 }
 
 /**
