@@ -2675,7 +2675,8 @@ function reviewerHasApprovedVote(reviewer) {
 }
 
 /**
- * Имена reviewer-групп на PR без финального апрува (vote < 5).
+ * Имена обязательных reviewer-групп на PR без финального апрува (vote < 5).
+ * Опциональные группы (`isRequired !== true`) в черновик канала не попадают.
  *
  * @param {any} pullRequest
  * @returns {string[]}
@@ -2685,7 +2686,11 @@ export function listPendingReviewerGroupNames(pullRequest) {
   const names = [];
 
   for (const reviewer of reviewers) {
-    if (reviewer?.isContainer !== true || reviewerHasApprovedVote(reviewer)) {
+    if (
+      reviewer?.isContainer !== true
+      || reviewer?.isRequired !== true
+      || reviewerHasApprovedVote(reviewer)
+    ) {
       continue;
     }
 

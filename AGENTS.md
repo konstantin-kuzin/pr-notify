@@ -99,7 +99,7 @@ options.mjs → adoConfig в storage → background (onChanged) → refresh PR
 - **Рабочее время и срочность:** [`working-time.mjs`](working-time.mjs) — пороги 6 / 8 / 16 рабочих часов; точка отсчёта — более позднее из `publishedFromDraftAt` и `lastCommitAt` (иначе `createdAt`), с учётом комментариев группы; сортировка «ожидающие ревью» выше.
 - **Approve (vote: 10):** сообщение `approve-pull-request` в [`background.mjs`](background.mjs), REST в `ado-api.mjs`.
 - **Complete на My PRs PRs:** сообщение `load-my-completed-pull-requests` в [`background.mjs`](background.mjs) / [`popup.mjs`](popup.mjs).
-- **Напоминание в IM:** сообщение `load-pr-im-reminders` — треды PR, чипы имён; иконка на всех карточках Review и My PRs; первым чип канала Hexa UI Contribute (ссылка на PR, группы без апрува, `@логин (Status «Waiting for the author»)` и `@логин (Unresolved comments)`). Popup копирует черновик и открывает чат в десктопном Squadus (`squadus://…`, без вкладки браузера и без автоотправки).
+- **Напоминание в IM:** сообщение `load-pr-im-reminders` — треды PR, чипы имён; иконка на всех карточках Review и My PRs; первым чип канала Hexa UI Contribute (ссылка на PR, обязательные группы без апрува, `@логин (Status «Waiting for the author»)` и `@логин (Unresolved comments)`). Popup копирует черновик и открывает чат в десктопном Squadus (`squadus://…`, без вкладки браузера и без автоотправки).
 - **Markdown в popup:** упрощённый парсер в [`popup.mjs`](popup.mjs) — не полноценный CommonMark.
 - **Периодическое обновление:** alarm каждые 10 мин (`CHECK_INTERVAL_MINUTES` в `background.mjs`).
 

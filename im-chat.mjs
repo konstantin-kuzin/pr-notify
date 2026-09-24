@@ -109,7 +109,7 @@ export function buildImReminderDraft(item) {
 }
 
 /**
- * Черновик в канал Hexa UI Contribute: ссылка на PR, группы без финального апрува,
+ * Черновик в канал Hexa UI Contribute: ссылка на PR, обязательные группы без финального апрува,
  * @логины Waiting for the author и авторы незарезолвленных комментариев.
  *
  * @param {any} item
